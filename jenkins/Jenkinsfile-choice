@@ -1,0 +1,15 @@
+parameties{
+	parameter {
+		choice(name: 'ENVIRONMENT',choice: ['dev','test','prod'],description: '请选择环境')
+	}
+}
+pipeline {
+	agent any
+	stages {
+		stage ('Print choice'){
+			steps {
+				echo "Choice 参数值为：${params.ENVIRONMENT}"
+			}
+		}
+	}
+}

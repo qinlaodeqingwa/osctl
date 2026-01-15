@@ -1,0 +1,26 @@
+properties([
+	parameters([
+		text(name: 'MY_Text',defaultValue: '请输入',description: '请输入多好')
+	])
+])
+pipeline {
+	agent any
+	stages {
+		stage('Write Text to File') {
+			steps {
+				writeFile file: 'user_input.txt',text: "${params.MY_TEXT}"
+				echo ""
+			}
+		}
+	}
+}
+//pipeline {
+//	agent any
+//	stages {
+//		stage('Print Text Param') {
+//			steps {
+//				echo "Text 参数值为：${params.MY_Text}"
+//			}
+//		}
+//	}
+//}

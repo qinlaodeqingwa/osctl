@@ -1,0 +1,403 @@
+// 启动器 Jenkinsfile - 支持自动检测项目 Jenkinsfile 或使用默认 Vue 构建流程
+
+def getBuildTag() {
+    return new Date().format('yyyyMMdd-HHmmss') + "-${env.BUILD_ID}"
+}
+
+properties([
+    parameters([
+        booleanParam(name: 'rendering', defaultValue: false, description: '是否要渲染页面'),
+        string(name: 'git_branch', defaultValue: 'master', description: '请输入代码分支', trim: true),
+        string(name: 'git_tag', defaultValue: '', description: '请输入代码TAG', trim: true),
+        choice(name: 'build_env', choices: ['production', 'staging', 'development'], description: '构建环境'),
+        booleanParam(name: 'skip_tests', defaultValue: false, description: '是否跳过测试'),
+        booleanParam(name: 'clean_install', defaultValue: false, description: '是否清理 node_modules 重新安装'),
+        extendedChoice(
+            name: 'hosts',
+            type: 'PT_CHECKBOX',
+            value: '192.168.110.8,192.168.110.171,192.168.110.172',
+            description: '请选择部署主机',
+            multiSelectDelimiter: ','
+        )
+    ])
+])
+
+node {
+    def BRANCH = ""
+    def BUILD_TAG = getBuildTag()
+    def DEPLOY_DIR = "/var/www/vue-admin-better"
+    def NODE_VERSION = "v16.20.0"
+
+    // 设置环境变量
+    env.PATH = "/usr/local/node-${NODE_VERSION}-linux-x64/bin:${env.PATH}"
+    env.NODE_OPTIONS = "--max-old-space-size=4096" // 增加 Node.js 内存限制
+
+    try {
+        // ==================== Git Clone ====================
+        stage('Git Clone') {
+            if (params.rendering == false && (params.git_branch != "" || params.git_tag != "")) {
+                echo "=== 开始拉取代码 ==="
+                if (params.git_tag != "") {
+                    echo "拉取 Tag: ${params.git_tag}"
+                    checkout([$class: 'GitSCM',
+                        branches: [[name: "refs/tags/${params.git_tag}"]],
+                        doGenerateSubmoduleConfigurations: false,
+                        extensions: [[$class: 'CloneOption', depth: 1, shallow: true]], // 浅克隆，加快速度
+                        userRemoteConfigs: [[
+                            credentialsId: 'git-ssh-key',
+                            url: 'git@github.com:qinlaodeqingwa/vue-admin-better.git'
+                        ]]
+                    ])
+                    BRANCH = params.git_tag
+                } else {
+                    echo "拉取分支: ${params.git_branch}"
+                    checkout([$class: 'GitSCM',
+                        branches: [[name: "*/${params.git_branch}"]],
+                        doGenerateSubmoduleConfigurations: false,
+                        extensions: [[$class: 'CloneOption', depth: 1, shallow: true]],
+                        userRemoteConfigs: [[
+                            credentialsId: 'git-ssh-key',
+                            url: 'git@github.com:qinlaodeqingwa/vue-admin-better.git'
+                        ]]
+                    ])
+                    BRANCH = params.git_branch
+                }
+
+                echo "✓ 代码拉取完成: ${BRANCH}"
+
+                // 显示最新提交信息
+                sh '''
+                    echo "最新提交信息:"
+                    git log -1 --pretty=format:"%h - %an, %ar : %s"
+                '''
+            }
+        }
+        // ==================== 检查项目 Jenkinsfile ====================
+        stage('Check Project Jenkinsfile') {
+            echo "=== 检查项目中是否存在 Jenkinsfile ==="
+
+            def locations = [
+                'Jenkinsfile',
+                '.jenkins/Jenkinsfile',
+                'ci/Jenkinsfile',
+                '.ci/Jenkinsfile',
+                'jenkins/Jenkinsfile'
+            ]
+            def foundJenkinsfile = null
+
+            // 显示当前目录内容
+            sh 'echo "当前目录: $(pwd)"; ls -la'
+
+            for (location in locations) {
+                if (fileExists(location)) {
+                    echo "✓ 发现 Jenkinsfile: ${location}"
+                    foundJenkinsfile = location
+                    break
+                } else {
+                    echo "✗ 未找到: ${location}"
+                }
+            }
+
+            if (foundJenkinsfile) {
+                echo "=== 使用项目中的 Jenkinsfile 执行构建 ==="
+                echo "Jenkinsfile 路径: ${foundJenkinsfile}"
+
+                // 读取并执行项目中的 Jenkinsfile
+                def jenkinsfileContent = readFile(foundJenkinsfile)
+                evaluate(jenkinsfileContent)
+
+                currentBuild.description = "✓ 使用项目 Jenkinsfile: ${foundJenkinsfile}"
+                currentBuild.result = 'SUCCESS'
+                return // 退出，不执行默认流程
+            } else {
+                echo "=== 未找到项目 Jenkinsfile，使用默认 Vue 构建流程 ==="
+                currentBuild.description = "使用默认构建流程 | 分支: ${BRANCH}"
+            }
+        }
+
+        // ==================== 以下是默认 Vue 构建流程 ====================
+
+        stage('Environment Check') {
+            echo "=== 检查构建环境 ==="
+            sh '''
+                echo "Node 版本:"
+                node -v
+                echo "NPM 版本:"
+                npm -v
+                echo "当前用户:"
+                whoami
+                echo "系统信息:"
+                uname -a
+            '''
+        }
+
+        stage('Clean Workspace') {
+            when {
+                expression { params.clean_install == true }
+            }
+			steps {
+				echo "=== 清理工作空间 ==="
+				script{
+					sh '''
+                		echo "删除 node_modules 和构建产物..."
+                		rm -rf node_modules
+                		rm -rf dist
+                		rm -rf package-lock.json
+                		echo "✓ 清理完成"
+            		'''
+				}
+			}
+        }
+
+        stage('Install Dependencies') {
+			steps {
+				echo "=== 安装项目依赖 ==="
+				script{
+					sh '''
+                # 设置 npm 镜像源
+                npm config set registry https://registry.npmmirror.com
+
+                # 显示 package.json 信息
+                if [ -f package.json ]; then
+                    echo "项目名称: $(node -p "require('./package.json').name")"
+                    echo "项目版本: $(node -p "require('./package.json').version")"
+                else
+                    echo "警告: 未找到 package.json 文件"
+                    exit 1
+                fi
+
+                # 安装依赖
+                echo "开始安装依赖..."
+                npm install --legacy-peer-deps --no-audit --prefer-offline
+
+                echo "✓ 依赖安装完成"
+            '''
+				}
+			}
+
+        }
+
+        stage('Lint Check') {
+            when {
+                expression { params.skip_tests == false }
+            }
+            echo "=== 代码质量检查 ==="
+            script {
+                try {
+                    sh '''
+                        # 检查是否有 lint 命令
+                        if npm run | grep -q "lint"; then
+                            echo "运行 ESLint 检查..."
+                            npm run lint || echo "警告: Lint 检查发现问题，但继续构建"
+                        else
+                            echo "跳过: 项目未配置 lint 命令"
+                        fi
+                    '''
+                } catch (Exception e) {
+                    echo "警告: Lint 检查失败，但继续构建"
+                }
+            }
+        }
+
+        stage('Run Tests') {
+            when {
+                expression { params.skip_tests == false }
+            }
+            echo "=== 运行单元测试 ==="
+            script {
+                try {
+                    sh '''
+                        # 检查是否有测试命令
+                        if npm run | grep -q "test:unit"; then
+                            echo "运行单元测试..."
+                            npm run test:unit
+                        elif npm run | grep -q "test"; then
+                            echo "运行测试..."
+                            npm run test
+                        else
+                            echo "跳过: 项目未配置测试命令"
+                        fi
+                    '''
+                } catch (Exception e) {
+                    echo "警告: 测试失败，但继续构建"
+                }
+            }
+        }
+
+        stage('Build Frontend') {
+            echo "=== 构建 Vue 项目 ==="
+            echo "构建环境: ${params.build_env}"
+            echo "构建标签: ${BUILD_TAG}"
+
+            sh """
+                # 设置构建环境变量
+                export NODE_ENV=${params.build_env}
+                export BUILD_TAG=${BUILD_TAG}
+
+                # 检查构建命令
+                if npm run | grep -q "build:${params.build_env}"; then
+                    echo "使用环境特定构建命令: build:${params.build_env}"
+                    npm run build:${params.build_env}
+                else
+                    echo "使用默认构建命令: build"
+                    npm run build
+                fi
+
+                # 检查构建产物
+                if [ -d "dist" ]; then
+                    echo "✓ 构建成功"
+                    echo "构建产物大小:"
+                    du -sh dist
+                    echo "构建产物内容:"
+                    ls -lh dist/
+                else
+                    echo "✗ 错误: 未找到 dist 目录"
+                    exit 1
+                fi
+            """
+        }
+
+        stage('Build Analysis') {
+            echo "=== 构建产物分析 ==="
+            sh '''
+                if [ -d "dist" ]; then
+                    echo "=== 文件统计 ==="
+                    echo "总文件数: $(find dist -type f | wc -l)"
+                    echo "JS 文件数: $(find dist -name "*.js" | wc -l)"
+                    echo "CSS 文件数: $(find dist -name "*.css" | wc -l)"
+                    echo "图片文件数: $(find dist -name "*.png" -o -name "*.jpg" -o -name "*.svg" | wc -l)"
+
+                    echo ""
+                    echo "=== 最大的 10 个文件 ==="
+                    find dist -type f -exec du -h {} + | sort -rh | head -10
+                fi
+            '''
+        }
+
+        stage('Deploy to Servers') {
+            echo "=== 部署到服务器 ==="
+
+            if (params.hosts && params.hosts.trim() != "") {
+                def hostList = params.hosts.split(',')
+                echo "部署目标: ${hostList.join(', ')}"
+
+                for (host in hostList) {
+                    echo "正在部署到: ${host}"
+
+                    // 这里根据实际情况选择部署方式
+                    // 方式1: 本地部署
+                    if (host == '192.168.110.8' || host == 'localhost') {
+                        sh """
+                            echo "本地部署到: ${DEPLOY_DIR}"
+
+                            # 备份旧版本
+                            if [ -d "${DEPLOY_DIR}" ]; then
+                                echo "备份旧版本..."
+                                tar -czf ${DEPLOY_DIR}_backup_${BUILD_TAG}.tar.gz -C ${DEPLOY_DIR} . || true
+                            fi
+
+                            # 创建目标目录
+                            mkdir -p ${DEPLOY_DIR}
+
+                            # 部署新版本
+                            echo "复制构建产物..."
+                            cp -rf dist/* ${DEPLOY_DIR}/
+
+                            # 设置权限
+                            chmod -R 755 ${DEPLOY_DIR}
+
+                            echo "✓ 部署完成: ${host}"
+                        """
+                    }
+                    // 方式2: 远程部署 (使用 scp)
+                    else {
+                        sh """
+                            echo "远程部署到: ${host}"
+
+                            # 使用 scp 部署（需要配置 SSH 免密登录）
+                            ssh -o StrictHostKeyChecking=no root@${host} "mkdir -p ${DEPLOY_DIR}_tmp"
+                            scp -r dist/* root@${host}:${DEPLOY_DIR}_tmp/
+
+                            # 原子性替换
+                            ssh root@${host} "
+                                if [ -d ${DEPLOY_DIR} ]; then
+                                    mv ${DEPLOY_DIR} ${DEPLOY_DIR}_backup_${BUILD_TAG}
+                                fi
+                                mv ${DEPLOY_DIR}_tmp ${DEPLOY_DIR}
+                                chmod -R 755 ${DEPLOY_DIR}
+                            "
+
+                            echo "✓ 部署完成: ${host}"
+                        """
+                    }
+                }
+            } else {
+                echo "跳过部署: 未选择部署主机"
+            }
+        }
+
+        stage('Health Check') {
+            echo "=== 健康检查 ==="
+            sh """
+                if [ -d "${DEPLOY_DIR}" ]; then
+                    echo "部署目录: ${DEPLOY_DIR}"
+                    echo "目录大小: \$(du -sh ${DEPLOY_DIR} | cut -f1)"
+                    echo "文件数量: \$(find ${DEPLOY_DIR} -type f | wc -l)"
+
+                    # 检查关键文件
+                    if [ -f "${DEPLOY_DIR}/index.html" ]; then
+                        echo "✓ index.html 存在"
+                    else
+                        echo "✗ 警告: index.html 不存在"
+                    fi
+
+                    echo ""
+                    echo "部署目录内容:"
+                    ls -lh ${DEPLOY_DIR}/
+                fi
+            """
+        }
+
+        stage('Notification') {
+            echo "=== 构建信息汇总 ==="
+            echo """
+            ========================================
+            构建成功！
+            ========================================
+            项目: vue-admin-better
+            分支/标签: ${BRANCH}
+            构建标签: ${BUILD_TAG}
+            构建环境: ${params.build_env}
+            部署目录: ${DEPLOY_DIR}
+            部署主机: ${params.hosts ?: '未部署'}
+            构建时间: ${new Date().format('yyyy-MM-dd HH:mm:ss')}
+            ========================================
+            """
+        }
+
+        // 设置构建结果
+        currentBuild.result = 'SUCCESS'
+        currentBuild.description = "✓ ${BRANCH} | ${params.build_env} | ${BUILD_TAG}"
+
+    } catch (Exception e) {
+        currentBuild.result = 'FAILURE'
+        currentBuild.description = "✗ 构建失败: ${e.message}"
+        echo "=========================================="
+        echo "构建失败！"
+        echo "错误信息: ${e.message}"
+        echo "=========================================="
+        throw e
+    } finally {
+        // 清理工作
+        stage('Cleanup') {
+            echo "=== 清理临时文件 ==="
+            sh '''
+                # 清理 npm 缓存（可选）
+                # npm cache clean --force
+
+                # 保留构建产物，清理其他临时文件
+                echo "保留 dist 目录，清理完成"
+            '''
+        }
+    }
+}

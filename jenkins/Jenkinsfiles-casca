@@ -1,0 +1,29 @@
+properties([
+	paramters([
+		choice(name: 'REGION',choices:['','North','South'],description:'请选择地区'),
+		[
+			$class: 'CascadeChoiceParameter',
+			name: 'CITY',
+			referencedParameters: 'REGION',
+			choiceType: 'PT_RADIO',
+			script: [
+				$class: 'GoovyScript',
+				fallbackScript: [classpath: [],sandbox:true,script: 'return ["请先选择地区"]'],
+				script: [
+					classpath: [],
+					sandbox:true,
+					script:'''
+					if (REGION == 'North'){
+						return ['Beijing','Tianjin','Harbin']
+					}else if (REGION == 'South') {
+                        return ['Shanghai', 'Guangzhou', 'Shenzhen']
+                    } else {
+                        return ['请先选择地区']
+                    }
+					'''
+				]
+			],
+			description: '请选择城市'
+		]
+	])
+])

@@ -1,0 +1,21 @@
+properties([
+	parameters([
+		parameters([
+			hidden(
+				name: 'hidden_param',
+				defaultValue: 'hidden_value',
+				description: 'Hidden parameter'
+			)
+		])
+	])
+])
+pipeline {
+	agent any
+	stages {
+		stage('Print Hidden Param'){
+			steps{
+				echo "隐藏参数值为：${params.hidden_param}"
+			}
+		}
+	}
+}

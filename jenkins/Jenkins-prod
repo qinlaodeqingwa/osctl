@@ -1,0 +1,930 @@
+properties([
+	parameters([
+		choice(
+			name: 'REPOSITORY',
+			choices: [
+				'zcf-charge-operation-platform',
+				'zcf-busi-middle-office',
+				'zcf-iot-gateway',
+				'zcf-data-platform-jobs',
+				'zcf-charge-plat',
+				'zcf-charge-tenant',
+				'zcf-data-platform-engine',
+				'zcf-charge-h5'
+			],
+			description: '选择要构建的代码仓库'
+		),
+
+		[$class: 'CascadeChoiceParameter',
+			choiceType: 'PT_SINGLE_SELECT',
+			name: 'BRANCH',
+			referencedParameters: 'REPOSITORY',
+			script: [
+				$class: 'GroovyScript',
+				fallbackScript: [
+					sandbox: true,
+					script: '''
+                        return ['请先选择代码仓库']
+                    '''
+				],
+				script: [
+					sandbox: false,
+					script: '''
+                       import jenkins.model.Jenkins
+                        import com.cloudbees.plugins.credentials.CredentialsProvider
+                        import com.cloudbees.plugins.credentials.common.StandardUsernamePasswordCredentials
+                        import com.cloudbees.plugins.credentials.domains.DomainRequirement
+
+                        def getCredentials(String credentialsId) {
+                            def creds = CredentialsProvider.lookupCredentials(
+                                StandardUsernamePasswordCredentials.class,
+                                Jenkins.instance,
+                                null,
+                                Collections.<DomainRequirement>emptyList()
+                            )
+                            return creds.find { it.id == credentialsId }
+                        }
+
+                        def credentialsId = '99b27b05-ecce-4a92-a478-f806be8528f3'
+                        def credentials = getCredentials(credentialsId)
+
+                        if (!credentials) {
+                            return ['错误: 未找到凭据']
+                        }
+
+                        def username = credentials.username
+                        def password = credentials.password.plainText
+
+                        def repoMap = [
+                        		'zcf-charge-operation-platform': 'https://codeup.aliyun.com/6552e8ef77eababf21d319a4/business-platform/backend/zcf-charge-operation-platform.git',
+								'zcf-busi-middle-office': 'https://codeup.aliyun.com/6552e8ef77eababf21d319a4/middle-office/backend/zcf-busi-middle-office.git',
+								'zcf-iot-gateway': 'https://codeup.aliyun.com/6552e8ef77eababf21d319a4/base-framework/backend/zcf-iot-gateway.git',
+								'zcf-charge-plat': 'https://codeup.aliyun.com/6552e8ef77eababf21d319a4/business-platform/frontend/zcf-charge-operation-platform-web.git',
+								'zcf-charge-tenant': 'https://codeup.aliyun.com/6552e8ef77eababf21d319a4/business-platform/frontend/zcf-charge-operation-tenant-web.git',
+								'zcf-data-platform-jobs': 'https://codeup.aliyun.com/6552e8ef77eababf21d319a4/data-middle-office/backend/zcf-data-middle-office-job.git',
+								'zcf-data-platform-engine': 'https://codeup.aliyun.com/6552e8ef77eababf21d319a4/data-middle-office/backend/zcf-data-middle-office-job-framework.git',
+                        		'zcf-charge-h5': 'https://codeup.aliyun.com/6552e8ef77eababf21d319a4/business-platform/frontend/zcf-charge-operation-h5.git'
+                        ]
+
+                        def repoUrl = repoMap[REPOSITORY]
+
+                        if (!repoUrl) {
+                            return ['请先选择代码仓库']
+                        }
+
+                        def authenticatedUrl = repoUrl.replace('https://', "https://${username}:${password}@")
+
+                        try {
+                            def command = "git ls-remote -h ${authenticatedUrl}"
+                            def proc = command.execute()
+                            proc.waitForOrKill(30000)
+
+                            def exitCode = proc.exitValue()
+                            def output = proc.text
+
+                            if (exitCode != 0) {
+                                return ['获取分支失败，请检查凭据和网络']
+                            }
+
+                            def branches = []
+                            output.eachLine { line ->
+                                if (line && line.trim()) {
+                                    def parts = line.trim().split(/\\s+/)
+                                    if (parts.size() >= 2 && parts[1].startsWith('refs/heads/')) {
+                                        def branchName = parts[1].replace('refs/heads/', '')
+                                        branches.add("origin/${branchName}".toString())
+                                    }
+                                }
+                            }
+
+                            if (branches.isEmpty()) {
+                                return ['未找到分支']
+                            }
+
+                            return branches.sort().reverse().collect { it.toString() }
+
+                        } catch (Exception e) {
+                            return ["异常: ${e.message}".toString()]
+                        }
+                    '''
+				]
+			],
+			description: '选择要构建的分支'
+		],
+
+		[$class: 'CascadeChoiceParameter',
+			choiceType: 'PT_CHECKBOX',
+			name: 'BUILD_MODULES',
+			referencedParameters: 'REPOSITORY,BRANCH',
+			script: [
+				$class: 'GroovyScript',
+				fallbackScript: [
+					sandbox: true,
+					script: '''
+                        return ['请先选择代码仓库和分支']
+                    '''
+				],
+				script: [
+					sandbox: false,
+					script: '''
+                        import jenkins.model.Jenkins
+                        import com.cloudbees.plugins.credentials.CredentialsProvider
+                        import com.cloudbees.plugins.credentials.common.StandardUsernamePasswordCredentials
+                        import com.cloudbees.plugins.credentials.domains.DomainRequirement
+
+                        def frontendProjects = ['zcf-charge-h5', 'zcf-charge-plat', 'zcf-charge-tenant']
+
+                        if (frontendProjects.contains(REPOSITORY)) {
+                            return ['前端项目无需选择模块']
+                        }
+
+                        def getCredentials(String credentialsId) {
+                            def creds = CredentialsProvider.lookupCredentials(
+                                StandardUsernamePasswordCredentials.class,
+                                Jenkins.instance,
+                                null,
+                                Collections.<DomainRequirement>emptyList()
+                            )
+                            return creds.find { it.id == credentialsId }
+                        }
+
+                        def credentialsId = '99b27b05-ecce-4a92-a478-f806be8528f3'
+                        def credentials = getCredentials(credentialsId)
+
+                        if (!credentials) {
+                            return ['错误: 未找到凭据']
+                        }
+
+                        def username = credentials.username
+                        def password = credentials.password.plainText
+
+                        def repoMap = [
+                            		'zcf-charge-operation-platform': 'https://codeup.aliyun.com/6552e8ef77eababf21d319a4/business-platform/backend/zcf-charge-operation-platform.git',
+		'zcf-busi-middle-office': 'https://codeup.aliyun.com/6552e8ef77eababf21d319a4/middle-office/backend/zcf-busi-middle-office.git',
+		'zcf-iot-gateway': 'https://codeup.aliyun.com/6552e8ef77eababf21d319a4/base-framework/backend/zcf-iot-gateway.git',
+		'zcf-charge-plat': 'https://codeup.aliyun.com/6552e8ef77eababf21d319a4/business-platform/frontend/zcf-charge-operation-platform-web.git',
+		'zcf-charge-tenant': 'https://codeup.aliyun.com/6552e8ef77eababf21d319a4/business-platform/frontend/zcf-charge-operation-tenant-web.git',
+		'zcf-data-platform-jobs': 'https://codeup.aliyun.com/6552e8ef77eababf21d319a4/data-middle-office/backend/zcf-data-middle-office-job.git',
+		'zcf-data-platform-engine': 'https://codeup.aliyun.com/6552e8ef77eababf21d319a4/data-middle-office/backend/zcf-data-middle-office-job-framework.git',
+		'zcf-charge-h5': 'https://codeup.aliyun.com/6552e8ef77eababf21d319a4/business-platform/frontend/zcf-charge-operation-h5.git'
+		]
+
+                        def repoUrl = repoMap[REPOSITORY]
+
+                        if (!repoUrl || !BRANCH) {
+                            return ['请先选择代码仓库和分支']
+                        }
+
+                        def authenticatedUrl = repoUrl.replace('https://', "https://${username}:${password}@")
+
+                        try {
+                            def tempDir = File.createTempFile("jenkins-modules-", "")
+                            tempDir.delete()
+                            tempDir.mkdirs()
+
+                            println "========== DEBUG: 获取模块列表 =========="
+                            println "Repository: ${REPOSITORY}"
+                            println "Branch: ${BRANCH}"
+                            println "Temp Dir: ${tempDir.absolutePath}"
+
+                            try {
+                                def branchName = BRANCH.replace('origin/', '')
+                                def cloneCommand = "git clone --depth 1 --branch ${branchName} ${authenticatedUrl} ${tempDir.absolutePath}"
+
+                                println "Executing: git clone --depth 1 --branch ${branchName} <repo> <temp>"
+
+                                def cloneProc = cloneCommand.execute()
+                                cloneProc.waitForOrKill(60000)
+
+                                def cloneExitCode = cloneProc.exitValue()
+
+                                if (cloneExitCode != 0) {
+                                    def cloneError = cloneProc.err.text
+                                    println "Clone failed: ${cloneError}"
+                                    return ['克隆仓库失败，请检查分支名称']
+                                }
+
+                                println "Clone successful"
+
+                                def pomFile = new File(tempDir, "pom.xml")
+
+                                if (!pomFile.exists()) {
+                                    println "pom.xml not found"
+                                    return ['未找到 pom.xml 文件']
+                                }
+
+                                println "Reading pom.xml"
+
+                                def allModules = []
+                                def deepScanProjects = [
+                                    'zcf-data-platform-jobs': ['job-dwd', 'job-dws', 'job-ods', 'job-ads', 'job-dim'],
+                                    'zcf-data-platform-engine': []
+                                ]
+
+                                if (deepScanProjects.containsKey(REPOSITORY)) {
+                                    def parentModules = deepScanProjects[REPOSITORY]
+
+                                    println "Deep scan enabled for: ${parentModules}"
+                                    parentModules.each { parentModule ->
+                                        def parentPomFile = new File(tempDir, "${parentModule}/pom.xml")
+
+                                        if (parentPomFile.exists()) {
+                                            println "Scanning parent module: ${parentModule}"
+
+                                            def parentPomContent = parentPomFile.text
+                                            def modulePattern = /<module>([^<]+)<\\/module>/
+                                            def matcher = parentPomContent =~ modulePattern
+
+                                            matcher.each { match ->
+                                                def subModuleName = match[1].trim()
+                                                if (subModuleName && !subModuleName.isEmpty()) {
+                                                    allModules.add("[${parentModule}]${subModuleName}".toString())
+                                                    println "  Found sub-module: ${subModuleName}"
+                                                }
+                                            }
+                                        } else {
+                                            println "Parent pom not found: ${parentModule}/pom.xml"
+                                        }
+                                    }
+                                }
+
+                                def pomContent = pomFile.text
+                                def modulePattern = /<module>([^<]+)<\\/module>/
+                                def matcher = pomContent =~ modulePattern
+
+                                matcher.each { match ->
+                                    def moduleName = match[1].trim()
+                                    if (moduleName && !moduleName.isEmpty()) {
+                                        if (!deepScanProjects.containsKey(REPOSITORY) ||
+                                            !deepScanProjects[REPOSITORY].contains(moduleName)) {
+                                            allModules.add(moduleName.toString())
+                                            println "Found root module: ${moduleName}"
+                                        }
+                                    }
+                                }
+
+                                println "Total modules found: ${allModules.size()}"
+                                println "Modules: ${allModules}"
+                                println "=========================================="
+
+                                if (allModules.isEmpty()) {
+                                    return ['未找到模块']
+                                }
+
+                                return allModules.sort().collect { it.toString() }
+
+                            } finally {
+                                tempDir.deleteDir()
+                                println "Temp dir cleaned"
+                            }
+
+                        } catch (Exception e) {
+                            println "Exception: ${e.message}"
+                            e.printStackTrace()
+                            return ["获取模块失败: ${e.message}".toString()]
+                        }
+                    '''
+				]
+			],
+			description: '选择要构建的模块（前端项目无需选择）'
+		],
+
+		string(
+			name: 'VERSION_SUFFIX',
+			defaultValue: 'SNAPSHOT',
+			description: '版本号后缀（如：SNAPSHOT、RC1、RELEASE）'
+		),
+
+		booleanParam(
+			name: 'SKIP_TESTS',
+			defaultValue: true,
+			description: '是否跳过单元测试'
+		)
+	])
+])
+
+pipeline {
+	agent any
+
+	tools {
+		maven 'maven3'
+	}
+
+	environment {
+		REPO_URL = getRepositoryUrl(params.REPOSITORY)
+		CREDENTIALS_ID = '99b27b05-ecce-4a92-a478-f806be8528f3'
+		MAVEN_SETTINGS = '/data/apache-maven-3.8.6/conf/settings-zcf-nexus.xml'
+		IS_FRONTEND = isFrontendProject(params.REPOSITORY)
+
+		ARTIFACTS_BASE_DIR = '/data/artifacts'
+	}
+
+	stages {
+		stage('准备阶段') {
+			steps {
+				script {
+					echo"""
+					构建信息
+					==========================================
+					代码仓库: ${params.REPOSITORY}
+					仓库地址: ${env.REPO_URL}
+					项目类型: ${env.IS_FRONTEND == 'true' ? '前端项目' : '后端项目'}
+					分支: ${params.BRANCH}
+					==========================================
+					"""
+					if (env.IS_FRONTEND == 'false') {
+						echo "构建模块: ${params.BUILD_MODULES}"
+					}
+					echo """
+					版本后缀: ${params.VERSION_SUFFIX}
+					跳过测试: ${params.SKIP_TESTS}
+					制品存储: ${env.ARTIFACTS_BASE_DIR}
+					==========================================
+					"""
+
+					sh """
+						mkdir -p ${env.ARTIFACTS_BASE_DIR}/backend
+						mkdir -p ${env.ARTIFACTS_BASE_DIR}/frontend
+						mkdir -p ${env.ARTIFACTS_BASE_DIR}/releases
+					"""
+				}
+			}
+		}
+
+		stage('拉取代码') {
+			steps {
+				script {
+					cleanWs()
+
+					checkout([
+						$class: 'GitSCM',
+						branches: [[name: params.BRANCH]],
+						userRemoteConfigs: [[
+							credentialsId: env.CREDENTIALS_ID,
+							url: env.REPO_URL
+						]]
+					])
+				}
+			}
+		}
+
+		stage('生成版本号并构建') {
+			steps {
+				script {
+					def gitCommitShort = sh(
+						script: "git rev-parse --short HEAD",
+						returnStdout: true
+					).trim()
+
+					def gitCommitTime = sh(
+						script: "git log -1 --format=%cd --date=format:'%Y%m%d%H%M%S'",
+						returnStdout: true
+					).trim()
+
+					def branchName = params.BRANCH.replaceAll('origin/', '').replaceAll('/', '-')
+					def buildVersion = "${gitCommitTime}-${gitCommitShort}-${branchName}-${params.VERSION_SUFFIX}"
+
+					env.BUILD_VERSION = buildVersion
+					env.GIT_COMMIT_SHORT = gitCommitShort
+					env.GIT_COMMIT_TIME = gitCommitTime
+					env.BRANCH_NAME = branchName
+
+					echo ""
+					echo """
+    ==========================================
+    版本信息
+    ==========================================
+    Git Commit: ${gitCommitShort}
+    提交时间: ${gitCommitTime}
+    分支名称: ${branchName}
+    版本后缀: ${params.VERSION_SUFFIX}
+    最终版本号: ${buildVersion}
+    ==========================================
+""".stripIndent().trim()
+
+					if (env.IS_FRONTEND == 'true') {
+						echo "开始构建前端项目: ${params.REPOSITORY}"
+
+						try {
+							def packageJsonExists = fileExists('package.json')
+							if (!packageJsonExists) {
+								error("未找到 package.json 文件")
+							}
+
+							echo "正在安装依赖..."
+							sh "/data/nodejs/node-v24.10.0-linux-x64/bin/npm install"
+
+							echo "正在构建项目..."
+							sh "/data/nodejs/node-v24.10.0-linux-x64/bin/npm run build:prod"
+
+							def distDir = "dist"
+							if (fileExists(distDir)) {
+								def tarName = "${params.REPOSITORY}-${buildVersion}.tar.gz"
+								sh "tar -czf ${tarName} ${distDir}"
+
+								env.BUILT_MODULES = params.REPOSITORY
+								env.FRONTEND_ARTIFACT = tarName
+								echo "✅ 前端项目构建成功，产物: ${tarName}"
+							} else {
+								error("构建产物目录 ${distDir} 不存在")
+							}
+
+						} catch (Exception e) {
+							echo "❌ 前端项目构建失败: ${e.message}"
+							throw e
+						}
+
+					} else {
+						echo """==========================================
+						📋 开始解析构建模块
+						原始模块列表: ${params.BUILD_MODULES}
+						==========================================
+						"""
+
+						def modules = params.BUILD_MODULES.split(',')
+						def buildResults = [:]
+						def builtModulesList = []
+						def artifactsList = []
+
+						echo "解析到 ${modules.size()} 个模块"
+
+						for (module in modules) {
+							module = module.trim()
+
+							if (!module) {
+								echo "⚠️ 跳过空模块"
+								continue
+							}
+
+							def buildPath = '.'
+							def moduleName = module
+							def parentModule = ''
+							def groupId = 'com.zcf.middle-office.data'
+							def originalModule = module
+							if (module.startsWith('[') && module.contains(']')) {
+								def parts = module.split(']', 2)
+								parentModule = parts[0].substring(1)
+								moduleName = parts[1]
+								buildPath = parentModule
+
+								echo """
+								🔍 检测到二级子模块
+								原始: ${originalModule}
+								父模块: ${parentModule}
+								子模块: ${moduleName}
+								"""
+							} else {
+								echo "🔍 普通模块: ${moduleName}"
+							}
+
+							echo """
+							==========================================
+							🔨 开始构建模块: ${moduleName}
+							==========================================
+							构建路径: ${buildPath}
+							模块名称: ${moduleName}
+							"""
+							if (parentModule) {
+								echo "父模块: ${parentModule}"
+								echo "GroupId: ${groupId}"
+							}
+							echo "=========================================="
+
+							try {
+								def skipTestsFlag = params.SKIP_TESTS ? '-DskipTests' : ''
+
+								def isDataPlatformJobs = params.REPOSITORY == 'zcf-data-platform-jobs'
+
+								def mavenCommand
+								if (parentModule && isDataPlatformJobs) {
+									echo "📦 使用完整坐标构建模式（zcf-data-platform-jobs）"
+									echo "⚠️ 注意：将在根目录执行构建以解析所有依赖"
+									mavenCommand = """
+										cd ${env.WORKSPACE}
+										pwd
+										echo "执行构建命令: mvn clean package -U -pl ${groupId}:${moduleName} -am ${skipTestsFlag}"
+										mvn clean package -U -pl ${groupId}:${moduleName} -am ${skipTestsFlag} \
+											-s ${MAVEN_SETTINGS} \
+											-gs ${MAVEN_SETTINGS}
+									"""
+								} else if (parentModule) {
+									echo "📦 使用相对路径构建模式"
+									mavenCommand = """
+										cd ${env.WORKSPACE}/${parentModule}
+										pwd
+										echo "执行构建命令: mvn clean package -U -pl ${moduleName} -am ${skipTestsFlag}"
+										mvn clean package -U -pl ${moduleName} -am ${skipTestsFlag} \
+											-s ${MAVEN_SETTINGS} \
+											-gs ${MAVEN_SETTINGS}
+									"""
+								} else {
+
+									echo "📦 使用普通构建模式"
+									mavenCommand = """
+										cd ${env.WORKSPACE}
+										pwd
+										echo "执行构建命令: mvn clean package -U -pl ${moduleName} -am ${skipTestsFlag}"
+										mvn clean package -U -pl ${moduleName} -am ${skipTestsFlag} \
+											-s ${MAVEN_SETTINGS} \
+											-gs ${MAVEN_SETTINGS}
+									"""
+								}
+
+								sh mavenCommand
+
+								buildResults[moduleName] = 'SUCCESS'
+								echo "✅ 模块 ${moduleName} 编译成功"
+
+								def jarSearchPath = parentModule ? "${parentModule}/${moduleName}" : moduleName
+
+								echo """
+								🔍 查找构建产物...
+								搜索路径: ${env.WORKSPACE}/${jarSearchPath}/target
+								"""
+
+								def targetDirExists = sh(
+									script: "[ -d '${env.WORKSPACE}/${jarSearchPath}/target' ] && echo 'yes' || echo 'no'",
+									returnStdout: true
+								).trim()
+
+								if (targetDirExists == 'no') {
+									echo "❌ target 目录不存在: ${env.WORKSPACE}/${jarSearchPath}/target"
+									buildResults[moduleName] = 'FAILED'
+									continue
+								}
+
+								echo "✅ target 目录存在"
+
+								sh "ls -lh ${env.WORKSPACE}/${jarSearchPath}/target/*.jar || true"
+
+								def jarFile = sh(
+									script: "find ${env.WORKSPACE}/${jarSearchPath}/target -name '*.jar' -not -name '*-sources.jar' -not -name '*-javadoc.jar' -not -name '*.original' | head -1",
+									returnStdout: true
+								).trim()
+
+								if (jarFile) {
+									echo "✅ 找到 jar 文件: ${jarFile}"
+
+									def jarName = jarFile.split('/').last()
+									def newJarName = jarName.replaceAll('\\.jar$', "-${buildVersion}.jar")
+									def newJarPath = "${env.WORKSPACE}/${jarSearchPath}/target/${newJarName}"
+
+									sh "cp ${jarFile} ${newJarPath}"
+									echo "✅ 重命名产物: ${newJarName}"
+
+									builtModulesList.add(moduleName)
+									artifactsList.add("${moduleName}:${newJarPath}")
+									echo "✅ 模块 ${moduleName} 构建完成"
+								} else {
+									echo "❌ 未找到 jar 文件"
+									buildResults[moduleName] = 'FAILED'
+								}
+
+							} catch (Exception e) {
+								buildResults[moduleName] = 'FAILED'
+								echo """
+								❌ 模块 ${moduleName} 构建失败"
+								错误信息: ${e.message}
+								堆栈跟踪已省略（Jenkins 安全限制）
+								"""
+							}
+
+							echo ""
+						}
+
+						echo """
+						==========================================
+						📊 构建统计
+						==========================================
+						总模块数: ${modules.size()}
+						成功模块数: ${builtModulesList.size()}
+						成功模块: ${builtModulesList.join(', ')}
+						==========================================
+						"""
+						env.BUILD_RESULTS = buildResults.collect { k, v -> "${k}:${v}" }.join(',')
+						env.BUILT_MODULES = builtModulesList.size() > 0 ? builtModulesList.join(', ') : '无'
+						env.BACKEND_ARTIFACTS = artifactsList.join('|')
+
+						echo "最终构建模块: ${env.BUILT_MODULES}"
+					}
+				}
+			}
+		}
+
+		stage('存储构建产物') {
+			steps {
+				script {
+					echo """
+					==========================================
+					开始存储构建产物到本地"
+					==========================================
+					"""
+
+					def gitCommitFull = ""
+					def gitAuthor = ""
+					def gitCommitTime = ""
+					def gitCommitMessage = ""
+
+					try {
+						gitCommitFull = sh(script: "git rev-parse HEAD", returnStdout: true).trim()
+						gitAuthor = sh(script: "git log -1 --format='%an <%ae>'", returnStdout: true).trim()
+						gitCommitTime = sh(script: "git log -1 --format='%ci'", returnStdout: true).trim()
+						gitCommitMessage = sh(script: "git log -1 --format='%s'", returnStdout: true).trim()
+					} catch (Exception e) {
+						echo "⚠️ 获取 Git 信息失败: ${e.message}"
+						gitCommitFull = "unknown"
+						gitAuthor = "unknown"
+						gitCommitTime = "unknown"
+						gitCommitMessage = "unknown"
+					}
+
+					def buildUser = "System"
+					def jenkinsNode = env.NODE_NAME ?: 'master'
+
+					if (env.IS_FRONTEND == 'true') {
+						def tarFile = env.FRONTEND_ARTIFACT
+						def targetDir = "${env.ARTIFACTS_BASE_DIR}/frontend/${params.REPOSITORY}"
+
+						sh "mkdir -p ${targetDir}"
+						sh "cp ${tarFile} ${targetDir}/"
+
+						def targetPath = "${targetDir}/${tarFile}"
+						def fileSize = sh(script: "du -h ${targetPath} | cut -f1", returnStdout: true).trim()
+						def fileMd5 = sh(script: "md5sum ${targetPath} | cut -d' ' -f1", returnStdout: true).trim()
+
+						echo """
+						✅ 前端产物已存储
+						路径: ${targetPath}
+						大小: ${fileSize}
+						MD5: ${fileMd5}
+                        """
+
+						def metadata = [
+							project: params.REPOSITORY,
+							type: 'frontend',
+							version: env.BUILD_VERSION,
+							artifact: tarFile,
+							path: targetPath,
+							size: fileSize,
+							md5: fileMd5,
+							gitCommit: env.GIT_COMMIT_SHORT ?: 'unknown',
+							gitCommitFull: gitCommitFull,
+							gitBranch: params.BRANCH,
+							gitAuthor: gitAuthor,
+							gitCommitTime: gitCommitTime,
+							gitCommitMessage: gitCommitMessage,
+							buildTime: new Date().format('yyyy-MM-dd HH:mm:ss'),
+							buildNumber: env.BUILD_NUMBER,
+							buildUrl: env.BUILD_URL ?: 'unknown',
+							buildUser: buildUser,
+							jenkinsNode: jenkinsNode
+						]
+
+						def jsonString = groovy.json.JsonOutput.toJson(metadata)
+						def prettyJson = groovy.json.JsonOutput.prettyPrint(jsonString)
+						prettyJson = decodeUnicode(prettyJson)
+
+						writeFile file: "${targetDir}/${tarFile}.json", text: prettyJson, encoding: 'UTF-8'
+						echo "   元数据: ${targetDir}/${tarFile}.json"
+
+					} else {
+						def artifacts = env.BACKEND_ARTIFACTS.split('\\|')
+						def storedCount = 0
+
+						for (artifact in artifacts) {
+							def parts = artifact.split(':')
+							if (parts.size() != 2) continue
+
+							def moduleName = parts[0].trim()
+							def jarPath = parts[1].trim()
+
+							if (!fileExists(jarPath)) {
+								echo "⚠️ 文件不存在，跳过: ${jarPath}"
+								continue
+							}
+
+							def jarName = jarPath.split('/').last()
+							def targetDir = "${env.ARTIFACTS_BASE_DIR}/backend/${params.REPOSITORY}/${moduleName}"
+
+							sh "mkdir -p ${targetDir}"
+							sh "cp ${jarPath} ${targetDir}/"
+
+							def targetPath = "${targetDir}/${jarName}"
+							def fileSize = sh(script: "du -h ${targetPath} | cut -f1", returnStdout: true).trim()
+							def fileMd5 = sh(script: "md5sum ${targetPath} | cut -d' ' -f1", returnStdout: true).trim()
+
+							echo """
+							✅ ${moduleName} 已存储
+							路径: ${targetPath}
+							大小: ${fileSize}
+							MD5: ${fileMd5}
+							"""
+
+							def moduleMetadata = [
+								project: params.REPOSITORY,
+								module: moduleName,
+								type: 'backend',
+								version: env.BUILD_VERSION,
+								artifact: jarName,
+								path: targetPath,
+								size: fileSize,
+								md5: fileMd5,
+								gitCommit: env.GIT_COMMIT_SHORT ?: 'unknown',
+								gitCommitFull: gitCommitFull,
+								gitBranch: params.BRANCH,
+								gitAuthor: gitAuthor,
+								gitCommitTime: gitCommitTime,
+								gitCommitMessage: gitCommitMessage,
+								buildTime: new Date().format('yyyy-MM-dd HH:mm:ss'),
+								buildNumber: env.BUILD_NUMBER,
+								buildUrl: env.BUILD_URL ?: 'unknown',
+								buildUser: buildUser,
+								jenkinsNode: jenkinsNode
+							]
+
+							def jsonString = groovy.json.JsonOutput.toJson(moduleMetadata)
+							def prettyJson = groovy.json.JsonOutput.prettyPrint(jsonString)
+							prettyJson = decodeUnicode(prettyJson)
+
+							writeFile file: "${targetDir}/${jarName}.json", text: prettyJson, encoding: 'UTF-8'
+
+							storedCount++
+						}
+
+						echo """
+						==========================================
+						存储统计: 成功 ${storedCount} 个模块
+						==========================================
+						"""
+					}
+				}
+			}
+		}
+
+		stage('归档到 Jenkins') {
+			steps {
+				script {
+					echo "正在归档构建产物到 Jenkins..."
+
+					try {
+						if (env.IS_FRONTEND == 'true') {
+							archiveArtifacts artifacts: "*.tar.gz", fingerprint: true
+							echo "✅ 前端产物已归档到 Jenkins"
+						} else {
+							def modules = params.BUILD_MODULES.split(',')
+							def archived = false
+
+							modules.each { module ->
+								module = module.trim()
+
+								def moduleName = module
+								def parentModule = ''
+
+								if (module.startsWith('[') && module.contains(']')) {
+									def parts = module.split(']', 2)
+									parentModule = parts[0].substring(1)
+									moduleName = parts[1]
+								}
+
+								def jarSearchPath = parentModule ? "${parentModule}/${moduleName}" : moduleName
+								def pattern = "${jarSearchPath}/target/*-${env.BUILD_VERSION}.jar"
+
+								if (findFiles(glob: pattern).size() > 0) {
+									archiveArtifacts artifacts: pattern, fingerprint: true, allowEmptyArchive: true
+									archived = true
+								}
+							}
+
+							if (archived) {
+								echo "✅ 后端产物已归档到 Jenkins"
+							}
+						}
+					} catch (Exception e) {
+						echo "⚠️ 归档失败: ${e.message}"
+					}
+				}
+			}
+		}
+
+		stage('清理旧版本') {
+			steps {
+				script {
+					echo "正在清理旧版本..."
+
+					try {
+						def projectType = env.IS_FRONTEND == 'true' ? 'frontend' : 'backend'
+						def projectDir = "${env.ARTIFACTS_BASE_DIR}/${projectType}/${params.REPOSITORY}"
+
+						if (params.VERSION_SUFFIX == 'SNAPSHOT') {
+							sh """
+								cd ${projectDir}
+								find . -name "*-SNAPSHOT.jar" -o -name "*-SNAPSHOT.tar.gz" | \
+								sort -r | tail -n +31 | xargs -r rm -f
+								find . -name "*-SNAPSHOT.jar.json" -o -name "*-SNAPSHOT.tar.gz.json" | \
+								sort -r | tail -n +31 | xargs -r rm -f
+							"""
+							echo "✅ 已清理旧的 SNAPSHOT 版本（保留最近 30 个）"
+						}
+
+					} catch (Exception e) {
+						echo "⚠️ 清理失败: ${e.message}"
+					}
+				}
+			}
+		}
+	}
+
+	post {
+		always {
+			script {
+				def buildUser = 'System'
+				try {
+					wrap([$class: 'BuildUser']) {
+						buildUser = env.BUILD_USER ?: 'System'
+					}
+				} catch (Exception e) {
+					buildUser = 'System'
+				}
+
+				def version = env.BUILD_VERSION ?: '未指定'
+				def timestamp = new Date().format('yyyy-MM-dd HH:mm:ss')
+				def modules = env.BUILT_MODULES ?: '无'
+				def projectType = env.IS_FRONTEND == 'true' ? '🌐' : '☕'
+
+				def buildStatus = currentBuild.result ?: 'SUCCESS'
+				def statusIcon = buildStatus == 'SUCCESS' ? '✅' : '❌'
+
+				currentBuild.description = """
+				${projectType} ${modules} |
+                📦 ${version} |
+                ⏰ ${timestamp} |
+                👤 ${buildUser} |
+                ${statusIcon}
+            """.replaceAll(/\s+/, ' ').trim()
+			}
+		}
+
+		success {
+			script {
+				def projectType = env.IS_FRONTEND == 'true' ? 'frontend' : 'backend'
+				def storagePath = "${env.ARTIFACTS_BASE_DIR}/${projectType}/${params.REPOSITORY}"
+
+				echo """
+				==========================================
+				🎉 构建完成
+				==========================================
+				版本号: ${env.BUILD_VERSION}
+				构建模块: ${env.BUILT_MODULES}
+				存储路径: ${storagePath}
+				Jenkins 归档: ${env.BUILD_URL}artifact/
+				==========================================
+				"""
+			}
+		}
+
+		failure {
+			echo "❌ 构建失败！请查看日志排查问题。"
+		}
+	}
+}
+
+def getRepositoryUrl(repoName) {
+	def repoMap = [
+		'zcf-charge-operation-platform': 'https://codeup.aliyun.com/6552e8ef77eababf21d319a4/business-platform/backend/zcf-charge-operation-platform.git',
+		'zcf-busi-middle-office': 'https://codeup.aliyun.com/6552e8ef77eababf21d319a4/middle-office/backend/zcf-busi-middle-office.git',
+		'zcf-iot-gateway': 'https://codeup.aliyun.com/6552e8ef77eababf21d319a4/base-framework/backend/zcf-iot-gateway.git',
+		'zcf-charge-plat': 'https://codeup.aliyun.com/6552e8ef77eababf21d319a4/business-platform/frontend/zcf-charge-operation-platform-web.git',
+		'zcf-charge-tenant': 'https://codeup.aliyun.com/6552e8ef77eababf21d319a4/business-platform/frontend/zcf-charge-operation-tenant-web.git',
+		'zcf-data-platform-jobs': 'https://codeup.aliyun.com/6552e8ef77eababf21d319a4/data-middle-office/backend/zcf-data-middle-office-job.git',
+		'zcf-data-platform-engine': 'https://codeup.aliyun.com/6552e8ef77eababf21d319a4/data-middle-office/backend/zcf-data-middle-office-job-framework.git',
+		'zcf-charge-h5': 'https://codeup.aliyun.com/6552e8ef77eababf21d319a4/business-platform/frontend/zcf-charge-operation-h5.git'
+	]
+	return repoMap[repoName]
+}
+
+def isFrontendProject(repoName) {
+	def frontendProjects = ['zcf-charge-plat', 'zcf-charge-tenant','zcf-charge-h5']
+	return frontendProjects.contains(repoName) ? 'true' : 'false'
+}
+
+def decodeUnicode(String text) {
+	def result = new StringBuilder()
+	def i = 0
+	while (i < text.length()) {
+		if (text[i] == '\\' && i + 5 < text.length() && text[i + 1] == 'u') {
+			try {
+				def unicode = text.substring(i + 2, i + 6)
+				def ch = (char) Integer.parseInt(unicode, 16)
+				result.append(ch)
+				i += 6
+			} catch (Exception e) {
+				result.append(text[i])
+				i++
+			}
+		} else {
+			result.append(text[i])
+			i++
+		}
+	}
+	return result.toString()
+}

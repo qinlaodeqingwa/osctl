@@ -1,0 +1,18 @@
+properties([
+	parameters([
+		booleanParam(name: "IS_DEBUG",defaultValue:false,description:"是否采用调试模式")
+	])
+])
+pipeline {
+	agent any
+	stages {
+		stage('Print Boolean Param') {
+			when {
+				expression { params.IS_DEBUG == false }
+			}
+			steps {
+				echo "Boolean 参数值为：${params.IS_DEBUG}"
+			}
+		}
+	}
+}

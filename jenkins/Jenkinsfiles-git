@@ -1,0 +1,61 @@
+properties([
+	parameters([
+		booleanParam(name:rendering,defaultValue: false,description: '是否要渲染页面'),
+		string(name: 'git_branch',defaultValue: 'master',description:'请输入代码分支',trim: 'true'),
+		string(name: 'git_tag', defaultValue: '', description: '请输入代码TAG', trim: true),
+		string(name: 'image', defaultValue: '', description: '请输入完整的镜像地址', trim: true),
+		hidden(	name: 'project_name', defaultValue: 'go-starter', description: '隐藏参数不给修改'),
+		extendedChoice(
+			name: 'hosts',
+			type: 'PT_CHECHBOX',
+			value: '192.168.241.30,192.168.241.31,192.168.241.32',
+			description: '请输入主机',
+			multiSelectDelimiter: ',',
+		),
+		string(name:'docker_run',defaultValue: 'docker run -d -p 9006:8080 --restart=always', description: '请输入Docker运行命令', trim: true),
+	])
+])
+pipeline {
+	agent {node-192.168.241.30}
+	options {
+		buildBiscarder(logRotaor(numTokeepStr: '30'))
+		ansiColor('xterm')
+	}
+	environment {
+		images_tag = getBuildTag()
+		brach = ""
+	}
+	stages {
+		stage('Git Clone') {
+			when {
+				expression {params.rendering == false && (params.git_brach != "" || params.git_tag !== "" )}
+			}
+			steps {
+				if (params.git_tag != ""){
+					checkout([$class: 'GitScm',
+						braches:[[name: "refs/tags/${params.git_tag}"]],
+						doGenerateSubmoduleConfigurations: false,
+						extensions: [],
+						userRemoteConfigs: [[
+							credentialsId: '',
+							url: ''
+						]]
+					])
+					brach = params.git_tag
+					echo "已克隆TAG"
+				}else {
+					git brach: params.git_branch,credentialsId: '',	url: ''
+					branch = params.git_branch
+				}
+			}
+		}
+	}
+	stage('Print String Param') {
+		when {
+			expression {params.rending == false}
+		}
+		steps {
+			echo: ""
+		}
+	}
+}

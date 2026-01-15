@@ -1,0 +1,1004 @@
+pipeline {
+	agent any
+
+	environment {
+		// 项目配置
+		PROJECT_NAME = 'order-service'
+		JAR_NAME = 'order-service.jar'
+		BUILD_DIR = "${PROJECT_NAME}/target"
+
+		// 归档配置
+		ARCHIVE_BASE_DIR = '/data/jenkins-archives'
+		ARCHIVE_DIR = "${ARCHIVE_BASE_DIR}/${PROJECT_NAME}"
+
+		// 生产环境配置
+		PROD_REMOTE_DIR = 'zcf-charge-operation-platform/order-service/'
+		PROD_DEPLOY_DIR = '/data/zcf-charge-operation-platform/order-service'
+
+		// 构建信息
+		BUILD_TIME = sh(script: "date '+%Y%m%d_%H%M%S'", returnStdout: true).trim()
+		GIT_COMMIT_SHORT = sh(script: "git rev-parse --short HEAD 2>/dev/null || echo 'unknown'", returnStdout: true).trim()
+		GIT_BRANCH = sh(script: "git rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'unknown'", returnStdout: true).trim()
+	}
+
+	parameters {
+		// 部署策略
+		choice(
+			name: 'DEPLOY_STRATEGY',
+			choices: ['灰度发布', '全量发布', '单机发布', '回滚'],
+			description: '''部署策略说明：
+• 灰度发布：按比例分批部署，逐步放量（推荐生产使用）
+• 全量发布：一次性部署到所有服务器
+• 单机发布：逐台部署，每台需要人工确认
+• 回滚：回滚到历史版本'''
+		)
+
+		// 生产服务器多选
+		extendedChoice(
+			name: 'TARGET_SERVERS',
+			type: 'PT_CHECKBOX',
+			description: '''选择要部署的生产服务器（可多选）
+建议：
+  - 灰度发布：选择所有服务器
+  - 单机发布：先选1-2台观察
+  - 全量发布：选择所有服务器''',
+			multiSelectDelimiter: ',',
+			value: 'prod-server-01,prod-server-02,prod-server-03,prod-server-04',
+			visibleItemCount: 5,
+			defaultValue: 'prod-server-01'
+		)
+
+		// 是否使用已有制品
+		booleanParam(
+			name: 'USE_EXISTING_ARTIFACT',
+			defaultValue: true,
+			description: '''是否使用已有制品？
+☑ 勾选：使用已归档的 JAR 包（推荐生产使用，无需重新构建）
+☐ 不勾选：重新从代码构建（适合测试环境）
+
+说明：生产环境建议使用已在测试环境验证过的制品'''
+		)
+
+		// 制品版本选择（使用已有制品时）
+		string(
+			name: 'ARTIFACT_VERSION',
+			defaultValue: 'latest',
+			description: '''要部署的制品版本：
+• latest - 使用最新版本（默认）
+• 具体版本号 - 例如：order-service_20231219_120000_abc1234_#123.jar
+
+查看可用版本：
+  ls -lh /data/jenkins-archives/order-service/*/'''
+		)
+
+		// 灰度发布比例
+		choice(
+			name: 'GRAY_PERCENTAGE',
+			choices: ['25%', '50%', '75%', '10%', '100%'],
+			description: '''灰度发布比例（仅灰度发布时生效）：
+
+示例（4台服务器）：
+• 10% = 第1批: 1台 → 第2批: 3台
+• 25% = 第1批: 1台 → 第2批: 3台
+• 50% = 第1批: 2台 → 第2批: 2台
+• 75% = 第1批: 3台 → 第2批: 1台
+• 100% = 第1批: 4台（等同全量发布）
+
+建议：首次发布用 25%，稳定后可用 50%'''
+		)
+
+		// 灰度批次间隔
+		choice(
+			name: 'GRAY_INTERVAL',
+			choices: ['5', '10', '15', '30', '60'],
+			description: '''灰度批次间隔时间（分钟）：
+
+• 5分钟 - 快速发布（适合小流量变更）
+• 10分钟 - 标准发布（推荐）
+• 15-30分钟 - 谨慎发布（重大变更）
+• 60分钟 - 超谨慎发布（核心功能变更）
+
+说明：间隔期间会监控服务状态'''
+		)
+
+		// 健康检查超时
+		string(
+			name: 'HEALTH_CHECK_TIMEOUT',
+			defaultValue: '120',
+			description: '健康检查超时时间（秒），生产环境建议 120 秒'
+		)
+
+		// 是否需要人工确认
+		booleanParam(
+			name: 'NEED_APPROVAL',
+			defaultValue: true,
+			description: '''灰度发布时是否需要人工确认下一批次？
+☑ 勾选：每批次部署后需要人工确认（推荐生产使用）
+☐ 不勾选：自动继续下一批次（适合测试环境）'''
+		)
+
+		// 构建选项（仅在不使用已有制品时生效）
+		booleanParam(
+			name: 'SKIP_TESTS',
+			defaultValue: false,
+			description: '是否跳过测试（仅在重新构建时生效，生产环境不建议跳过）'
+		)
+
+		// 回滚版本
+		string(
+			name: 'ROLLBACK_VERSION',
+			defaultValue: '',
+			description: '''回滚版本（仅回滚模式需要）
+格式：order-service_20231219_120000_abc1234_#123.jar
+
+查看历史版本：
+  ls -lh /data/jenkins-archives/order-service/*/
+  cat /data/jenkins-archives/order-service/*/*.info'''
+		)
+
+		// 发布原因（必填）
+		text(
+			name: 'RELEASE_NOTES',
+			defaultValue: '',
+			description: '''发布说明（必填）：
+请描述本次发布的内容，例如：
+• 修复了什么 Bug
+• 新增了什么功能
+• 优化了什么性能
+• 其他重要变更
+
+此信息将记录到发布日志中'''
+		)
+	}
+
+	options {
+		buildDiscarder(logRotator(
+			numToKeepStr: '20',           // 保留更多构建记录
+			daysToKeepStr: '90',          // 保留 90 天
+			artifactDaysToKeepStr: '30',  // 制品保留 30 天（生产环境）
+			artifactNumToKeepStr: '10'    // 保留最近 10 个制品
+		))
+		timestamps()
+		disableConcurrentBuilds()
+		timeout(time: 120, unit: 'MINUTES')  // 生产环境超时时间更长
+	}
+
+	stages {
+		stage('🔍 参数验证与风险提示') {
+			steps {
+				script {
+					echo """
+╔════════════════════════════════════════════════════════════╗
+║                  ⚠️  生产环境部署                         ║
+╠════════════════════════════════════════════════════════════╣
+║ 项目名称: ${PROJECT_NAME}
+║ 部署策略: ${params.DEPLOY_STRATEGY}
+║ 目标服务器: ${params.TARGET_SERVERS}
+║ 灰度比例: ${params.GRAY_PERCENTAGE}
+║ 批次间隔: ${params.GRAY_INTERVAL} 分钟
+║ 人工确认: ${params.NEED_APPROVAL ? '是' : '否'}
+║ 使用已有制品: ${params.USE_EXISTING_ARTIFACT ? '是' : '否'}
+║ 制品版本: ${params.ARTIFACT_VERSION}
+║ 构建时间: ${BUILD_TIME}
+║ Git 分支: ${GIT_BRANCH}
+║ Git Commit: ${GIT_COMMIT_SHORT}
+╠════════════════════════════════════════════════════════════╣
+║ 发布说明:
+║ ${params.RELEASE_NOTES ?: '（未填写）'}
+╚════════════════════════════════════════════════════════════╝
+"""
+
+					// 验证发布说明
+					if (!params.RELEASE_NOTES || params.RELEASE_NOTES.trim() == '') {
+						error("❌ 错误: 生产环境部署必须填写发布说明!")
+					}
+
+					// 验证服务器选择
+					if (!params.TARGET_SERVERS || params.TARGET_SERVERS.trim() == '') {
+						error("❌ 错误: 必须选择至少一台服务器!")
+					}
+
+					// 解析选中的服务器
+					def selectedServers = params.TARGET_SERVERS.split(',').collect { it.trim() }
+					env.SELECTED_SERVERS = selectedServers.join(',')
+					env.SERVER_COUNT = selectedServers.size().toString()
+
+					echo """
+✅ 已选择 ${env.SERVER_COUNT} 台服务器: ${env.SELECTED_SERVERS}
+
+部署流程说明:
+"""
+
+					// 根据策略显示不同的流程说明
+					switch(params.DEPLOY_STRATEGY) {
+					case '灰度发布':
+					def firstBatchSize = Math.max(1, (selectedServers.size() * (params.GRAY_PERCENTAGE.replace('%', '').toInteger() / 100.0)).toInteger())
+					def secondBatchSize = selectedServers.size() - firstBatchSize
+					echo """
+【灰度发布流程】
+1️⃣  第一批次: 部署 ${firstBatchSize} 台服务器 (${params.GRAY_PERCENTAGE})
+   ↓ 健康检查
+   ↓ ${params.NEED_APPROVAL ? '等待人工确认' : '自动继续'}
+   ↓ 等待 ${params.GRAY_INTERVAL} 分钟观察
+2️⃣  第二批次: 部署剩余 ${secondBatchSize} 台服务器
+   ↓ 健康检查
+3️⃣  最终验证
+   ↓ 全量健康检查
+✅ 部署完成
+
+优势: 风险可控，出问题影响面小
+"""
+					break
+
+					case '全量发布':
+					echo """
+【全量发布流程】
+1️⃣  同时部署所有 ${selectedServers.size()} 台服务器
+   ↓ 健康检查
+2️⃣  最终验证
+✅ 部署完成
+
+风险: 如果有问题，所有服务器同时受影响
+"""
+					break
+
+					case '单机发布':
+					echo """
+【单机发布流程】
+${selectedServers.collect { "1️⃣  部署 ${it}\n   ↓ 健康检查\n   ↓ 人工确认" }.join('\n')}
+✅ 部署完成
+
+优势: 最安全，每台都需要人工确认
+劣势: 耗时较长
+"""
+					break
+
+					case '回滚':
+					if (!params.ROLLBACK_VERSION || params.ROLLBACK_VERSION.trim() == '') {
+						error("❌ 错误: 回滚模式必须指定回滚版本!")
+					}
+					echo """
+【回滚流程】
+🔄 回滚到版本: ${params.ROLLBACK_VERSION}
+1️⃣  同时回滚所有 ${selectedServers.size()} 台服务器
+   ↓ 健康检查
+2️⃣  最终验证
+✅ 回滚完成
+"""
+					break
+					}
+				}
+			}
+		}
+
+		stage('📦 准备部署制品') {
+			steps {
+				script {
+					if (params.DEPLOY_STRATEGY == '回滚') {
+						// 回滚模式：使用指定版本
+						env.DEPLOY_JAR_NAME = params.ROLLBACK_VERSION
+						env.DEPLOY_JAR_PATH = sh(
+							script: "find ${ARCHIVE_DIR} -name '${params.ROLLBACK_VERSION}' -type f | head -1",
+							returnStdout: true
+						).trim()
+
+						if (!env.DEPLOY_JAR_PATH || env.DEPLOY_JAR_PATH == '') {
+							error("❌ 错误: 找不到回滚版本 ${params.ROLLBACK_VERSION}")
+						}
+
+						echo """
+🔄 回滚模式
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+版本: ${env.DEPLOY_JAR_NAME}
+路径: ${env.DEPLOY_JAR_PATH}
+"""
+
+						// 显示版本信息
+						sh """
+                            if [ -f ${env.DEPLOY_JAR_PATH}.info ]; then
+                                echo "版本信息:"
+                                cat ${env.DEPLOY_JAR_PATH}.info
+                            fi
+                        """
+
+					} else if (params.USE_EXISTING_ARTIFACT) {
+						// 使用已有制品
+						if (params.ARTIFACT_VERSION == 'latest') {
+							// 使用最新版本
+							env.DEPLOY_JAR_PATH = "${ARCHIVE_DIR}/${PROJECT_NAME}_latest.jar"
+
+							if (!fileExists(env.DEPLOY_JAR_PATH)) {
+								error("❌ 错误: 找不到最新版本，请先在测试环境构建")
+							}
+
+							env.DEPLOY_JAR_NAME = sh(
+								script: "basename \$(readlink -f ${env.DEPLOY_JAR_PATH})",
+								returnStdout: true
+							).trim()
+
+							echo """
+📦 使用最新制品
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+版本: ${env.DEPLOY_JAR_NAME}
+路径: ${env.DEPLOY_JAR_PATH}
+"""
+
+						} else {
+							// 使用指定版本
+							env.DEPLOY_JAR_NAME = params.ARTIFACT_VERSION
+							env.DEPLOY_JAR_PATH = sh(
+								script: "find ${ARCHIVE_DIR} -name '${params.ARTIFACT_VERSION}' -type f | head -1",
+								returnStdout: true
+							).trim()
+
+							if (!env.DEPLOY_JAR_PATH || env.DEPLOY_JAR_PATH == '') {
+								error("❌ 错误: 找不到指定版本 ${params.ARTIFACT_VERSION}")
+							}
+
+							echo """
+📦 使用指定制品
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+版本: ${env.DEPLOY_JAR_NAME}
+路径: ${env.DEPLOY_JAR_PATH}
+"""
+						}
+
+						// 显示制品信息
+						sh """
+                            echo "制品详情:"
+                            ls -lh ${env.DEPLOY_JAR_PATH}
+                            md5sum ${env.DEPLOY_JAR_PATH}
+
+                            if [ -f ${env.DEPLOY_JAR_PATH}.info ]; then
+                                echo ""
+                                echo "构建信息:"
+                                cat ${env.DEPLOY_JAR_PATH}.info
+                            fi
+                        """
+
+					} else {
+						// 重新构建（生产环境不推荐）
+						echo """
+⚠️  警告: 正在重新构建代码
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+生产环境建议使用已验证的制品！
+"""
+
+						// 这里可以添加构建逻辑，参考之前的代码
+						error("❌ 生产环境不允许重新构建，请使用已有制品或先在测试环境构建")
+					}
+
+					// 人工确认
+					timeout(time: 10, unit: 'MINUTES') {
+						input message: """
+╔════════════════════════════════════════════════════════════╗
+║              ⚠️  生产环境部署确认                         ║
+╠════════════════════════════════════════════════════════════╣
+║ 部署策略: ${params.DEPLOY_STRATEGY}
+║ 目标服务器: ${env.SELECTED_SERVERS}
+║ 服务器数量: ${env.SERVER_COUNT} 台
+║ 部署版本: ${env.DEPLOY_JAR_NAME}
+║
+║ 发布说明:
+║ ${params.RELEASE_NOTES}
+╠════════════════════════════════════════════════════════════╣
+║ 请确认以上信息无误后继续部署
+╚════════════════════════════════════════════════════════════╝
+""",
+						ok: '✅ 确认部署',
+						submitter: 'admin,release-manager'
+					}
+				}
+			}
+		}
+	}
+
+	stage('📋 制定部署计划') {
+		steps {
+			script {
+				// 解析服务器列表
+				def allServers = env.SELECTED_SERVERS.split(',').collect { it.trim() }
+
+				// 根据部署策略分组服务器
+				def serverGroups = []
+
+				switch(params.DEPLOY_STRATEGY) {
+				case '全量发布':
+				serverGroups = [allServers]
+				break
+
+				case '单机发布':
+				serverGroups = allServers.collect { [it] }
+				break
+
+				case '灰度发布':
+				serverGroups = calculateGrayGroups(allServers, params.GRAY_PERCENTAGE)
+				break
+
+				case '回滚':
+				serverGroups = [allServers]
+				break
+				}
+
+				env.SERVER_GROUPS = groovy.json.JsonOutput.toJson(serverGroups)
+
+				echo """
+╔════════════════════════════════════════════════════════════╗
+║                      部署计划                              ║
+╠════════════════════════════════════════════════════════════╣
+║ 策略: ${params.DEPLOY_STRATEGY}
+║ 总服务器数: ${allServers.size()}
+║ 分批次数: ${serverGroups.size()}
+║ 部署文件: ${env.DEPLOY_JAR_NAME}
+╠════════════════════════════════════════════════════════════╣
+"""
+				serverGroups.eachWithIndex { group, index ->
+					echo "║ 批次 ${index + 1}: ${group.join(', ')}"
+				}
+				echo "╚════════════════════════════════════════════════════════════╝"
+			}
+		}
+	}
+
+	stage('🚀 执行部署') {
+		steps {
+			script {
+				def serverGroups = new groovy.json.JsonSlurper().parseText(env.SERVER_GROUPS)
+				def totalGroups = serverGroups.size()
+
+				serverGroups.eachWithIndex { group, batchIndex ->
+					def batchNum = batchIndex + 1
+
+					echo """
+╔════════════════════════════════════════════════════════════╗
+║              开始部署批次 ${batchNum}/${totalGroups}                        ║
+║              服务器: ${group.join(', ')}                    ║
+║              时间: ${new Date().format('yyyy-MM-dd HH:mm:ss')}
+╚════════════════════════════════════════════════════════════╝
+"""
+
+					// 并行部署当前批次的所有服务器
+					def deployTasks = [:]
+
+					group.each { serverName ->
+						deployTasks[serverName] = {
+							deployToServer(
+								serverName,
+								env.DEPLOY_JAR_PATH,
+								env.DEPLOY_JAR_NAME,
+								params.HEALTH_CHECK_TIMEOUT
+							)
+						}
+					}
+
+					// 执行并行部署
+					parallel deployTasks
+
+					echo "✅ 批次 ${batchNum}/${totalGroups} 部署完成"
+
+					// 批次间处理
+					if (batchNum < totalGroups) {
+						echo """
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+批次 ${batchNum} 部署完成，开始观察期
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
+
+						echo "⏳ 等待 30 秒让服务稳定..."
+						sleep(time: 30, unit: 'SECONDS')
+
+						// 检查当前批次服务健康状态
+						echo "🔍 检查批次 ${batchNum} 服务健康状态..."
+						def allHealthy = true
+						def healthStatus = [:]
+
+						group.each { serverName ->
+							def healthy = checkServerHealth(serverName)
+							healthStatus[serverName] = healthy
+							if (!healthy) {
+								allHealthy = false
+							}
+						}
+
+						// 显示健康检查结果
+						echo """
+健康检查结果:
+${healthStatus.collect { server, healthy ->
+						"  ${healthy ? '✅' : '❌'} ${server}: ${healthy ? '正常' : '异常'}"
+						}.join('\n')}
+"""
+
+						if (!allHealthy) {
+							error("""
+❌ 批次 ${batchNum} 健康检查失败，停止后续部署！
+
+失败服务器: ${healthStatus.findAll { !it.value }.collect { it.key }.join(', ')}
+
+建议操作:
+1. 检查失败服务器的日志
+2. 确认问题原因
+3. 如需回滚，选择"回滚"策略重新部署
+""")
+						}
+
+						echo "✅ 批次 ${batchNum} 健康检查通过"
+
+						// 人工确认
+						if (params.NEED_APPROVAL && batchNum < totalGroups) {
+							timeout(time: 30, unit: 'MINUTES') {
+								input message: """
+╔════════════════════════════════════════════════════════════╗
+║              批次 ${batchNum}/${totalGroups} 部署完成                      ║
+╠════════════════════════════════════════════════════════════╣
+║ 已部署服务器: ${group.join(', ')}
+║ 健康状态: ✅ 全部正常
+║
+║ 下一批次服务器: ${serverGroups[batchNum].join(', ')}
+║
+║ 请确认:
+║ 1. 检查监控指标（CPU、内存、QPS等）
+║ 2. 检查业务日志是否有异常
+║ 3. 检查用户反馈是否正常
+╠════════════════════════════════════════════════════════════╣
+║ 确认无误后，点击"继续部署"按钮
+╚════════════════════════════════════════════════════════════╝
+""",
+								ok: '✅ 继续部署',
+								submitter: 'admin,release-manager'
+							}
+						}
+
+						// 批次间隔
+						if (params.GRAY_INTERVAL.toInteger() > 0) {
+							echo """
+⏳ 观察期: 等待 ${params.GRAY_INTERVAL} 分钟后继续...
+
+建议在此期间:
+• 监控服务器资源使用情况
+• 查看应用日志是否有异常
+• 检查业务指标是否正常
+• 关注用户反馈
+"""
+							sleep(time: params.GRAY_INTERVAL.toInteger(), unit: 'MINUTES')
+						}
+					}
+				}
+
+				echo """
+╔════════════════════════════════════════════════════════════╗
+║              ✅ 所有批次部署完成!                          ║
+╚════════════════════════════════════════════════════════════╝
+"""
+			}
+		}
+	}
+
+	stage('🔍 最终验证') {
+		steps {
+			script {
+				echo """
+╔════════════════════════════════════════════════════════════╗
+║                  最终健康检查                              ║
+╚════════════════════════════════════════════════════════════╝
+"""
+
+				def allServers = env.SELECTED_SERVERS.split(',').collect { it.trim() }
+				def healthStatus = [:]
+
+				allServers.each { serverName ->
+					healthStatus[serverName] = checkServerHealth(serverName)
+				}
+
+				echo """
+╔════════════════════════════════════════════════════════════╗
+║                  健康检查结果                              ║
+╠════════════════════════════════════════════════════════════╣
+"""
+				healthStatus.each { server, healthy ->
+					def status = healthy ? '✅ 正常' : '❌ 异常'
+					echo "║ ${server.padRight(30)} ${status}"
+				}
+				echo "╚════════════════════════════════════════════════════════════╝"
+
+				def failedServers = healthStatus.findAll { !it.value }.collect { it.key }
+
+				if (failedServers.size() > 0) {
+					currentBuild.result = 'UNSTABLE'
+					echo """
+⚠️  警告: 以下服务器健康检查失败
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+${failedServers.join('\n')}
+
+建议操作:
+1. 登录服务器检查日志
+2. 确认服务是否正常启动
+3. 如有问题，立即回滚
+"""
+				} else {
+					echo """
+✅ 所有服务器健康检查通过
+
+部署成功! 🎉
+"""
+				}
+			}
+		}
+	}
+
+	stage('📝 记录发布日志') {
+		steps {
+			script {
+				def releaseLog = """
+╔════════════════════════════════════════════════════════════╗
+║                  生产发布记录                              ║
+╠════════════════════════════════════════════════════════════╣
+║ 发布时间: ${BUILD_TIME}
+║ 发布人: ${env.BUILD_USER ?: 'Jenkins'}
+║ 构建编号: #${BUILD_NUMBER}
+║
+║ 部署策略: ${params.DEPLOY_STRATEGY}
+║ 灰度比例: ${params.GRAY_PERCENTAGE}
+║ 批次间隔: ${params.GRAY_INTERVAL} 分钟
+║
+║ 目标服务器: ${env.SELECTED_SERVERS}
+║ 服务器数量: ${env.SERVER_COUNT} 台
+║
+║ 部署版本: ${env.DEPLOY_JAR_NAME}
+║ Git 分支: ${GIT_BRANCH}
+║ Git Commit: ${GIT_COMMIT_SHORT}
+║
+║ 发布说明:
+║ ${params.RELEASE_NOTES}
+║
+║ 构建日志: ${BUILD_URL}console
+╚════════════════════════════════════════════════════════════╝
+"""
+
+				echo releaseLog
+
+				// 保存发布日志
+				sh """
+                        mkdir -p /data/jenkins-release-logs
+                        cat > /data/jenkins-release-logs/release_${BUILD_TIME}.log <<'EOF'
+${releaseLog}
+EOF
+
+                        echo "✅ 发布日志已保存: /data/jenkins-release-logs/release_${BUILD_TIME}.log"
+                    """
+			}
+		}
+	}
+}
+
+post {
+	success {
+		script {
+			def deployInfo = """
+╔════════════════════════════════════════════════════════════╗
+║              ✅ 生产部署成功!                              ║
+╠════════════════════════════════════════════════════════════╣
+║ 项目: ${PROJECT_NAME}
+║ 策略: ${params.DEPLOY_STRATEGY}
+║ 版本: ${env.DEPLOY_JAR_NAME}
+║ 服务器数: ${env.SERVER_COUNT} 台
+║ 完成时间: ${new Date().format('yyyy-MM-dd HH:mm:ss')}
+╠════════════════════════════════════════════════════════════╣
+║ 部署服务器列表:
+${env.SELECTED_SERVERS.split(',').collect { "║   ✓ ${it}" }.join('\n')}
+╠════════════════════════════════════════════════════════════╣
+║ 发布说明:
+║ ${params.RELEASE_NOTES}
+╚════════════════════════════════════════════════════════════╝
+
+后续建议:
+• 持续监控服务器资源使用情况
+• 关注应用日志是否有异常
+• 检查业务指标是否正常
+• 收集用户反馈
+"""
+			echo deployInfo
+
+			// 可选: 发送钉钉/邮件通知
+			// dingTalk(
+			//     robot: 'your-robot-id',
+			//     type: 'MARKDOWN',
+			//     title: '✅ 生产部署成功',
+			//     text: [deployInfo]
+			// )
+		}
+	}
+
+	failure {
+		script {
+			echo """
+╔════════════════════════════════════════════════════════════╗
+║              ❌ 生产部署失败!                              ║
+╠════════════════════════════════════════════════════════════╣
+║ 项目: ${PROJECT_NAME}
+║ 策略: ${params.DEPLOY_STRATEGY}
+║ 失败时间: ${new Date().format('yyyy-MM-dd HH:mm:ss')}
+║ 日志: ${BUILD_URL}console
+╠════════════════════════════════════════════════════════════╣
+║ 紧急处理:
+║ 1. 查看构建日志确认失败原因
+║ 2. 如已部分部署，评估是否需要回滚
+║ 3. 通知相关人员
+║ 4. 修复问题后重新部署
+╚════════════════════════════════════════════════════════════╝
+"""
+
+			// 可选: 发送告警通知
+		}
+	}
+
+	unstable {
+		script {
+			echo """
+╔════════════════════════════════════════════════════════════╗
+║              ⚠️  部署完成但存在异常                       ║
+╠════════════════════════════════════════════════════════════╣
+║ 部分服务器健康检查未通过
+║ 请立即检查并处理
+╚════════════════════════════════════════════════════════════╝
+"""
+		}
+	}
+}
+
+
+// ========== 辅助函数 ==========
+
+// 计算灰度分组
+def calculateGrayGroups(servers, percentage) {
+	def totalServers = servers.size()
+	def groups = []
+
+	// 计算第一批次数量
+	def firstBatchSize = Math.max(1, (totalServers * (percentage.replace('%', '').toInteger() / 100.0)).toInteger())
+
+	// 第一批次
+	groups.add(servers.take(firstBatchSize))
+
+	// 第二批次（剩余的）
+	if (servers.size() > firstBatchSize) {
+		groups.add(servers.drop(firstBatchSize))
+	}
+
+	return groups.findAll { it.size() > 0 }
+}
+
+// 部署到单台服务器
+def deployToServer(serverName, jarPath, jarName, healthCheckTimeout) {
+	echo ">>> 开始部署到服务器: ${serverName}"
+
+	try {
+		// 停止服务
+		sshPublisher(
+			continueOnError: false,
+			failOnError: true,
+			publishers: [
+				sshPublisherDesc(
+					configName: serverName,  // 直接使用服务器名称作为 SSH 配置名
+					transfers: [
+						sshTransfer(
+							execCommand: """#!/bin/bash
+set -e
+
+APP_NAME="${env.JAR_NAME}"
+echo "[${serverName}] 停止服务: \${APP_NAME}"
+
+PIDS=\$(ps -ef | grep "\$APP_NAME" | grep -v grep | awk '{print \$2}')
+
+if [ -n "\$PIDS" ]; then
+    echo "[${serverName}] 发现进程: \$PIDS，开始停止..."
+
+    # 优雅停止
+    for pid in \$PIDS; do
+        kill -15 \$pid 2>/dev/null || true
+    done
+
+    # 等待进程退出
+    for i in {1..15}; do
+        sleep 2
+        REMAINING=\$(ps -ef | grep "\$APP_NAME" | grep -v grep | awk '{print \$2}')
+        if [ -z "\$REMAINING" ]; then
+            echo "[${serverName}] ✅ 服务已优雅停止"
+            exit 0
+        fi
+        echo "[${serverName}] 等待进程退出... \${i}/15"
+    done
+
+    # 强制终止
+    echo "[${serverName}] ⚠️  优雅停止超时，强制终止进程..."
+    for pid in \$PIDS; do
+        kill -9 \$pid 2>/dev/null || true
+    done
+    sleep 2
+
+    # 最终确认
+    FINAL_CHECK=\$(ps -ef | grep "\$APP_NAME" | grep -v grep | awk '{print \$2}')
+    if [ -n "\$FINAL_CHECK" ]; then
+        echo "[${serverName}] ❌ 无法停止进程: \$FINAL_CHECK"
+        exit 1
+    fi
+fi
+
+echo "[${serverName}] ✅ 服务停止完成"
+"""
+						)
+					]
+				)
+			]
+		)
+
+		// 传输文件并启动
+		sshPublisher(
+			continueOnError: false,
+			failOnError: true,
+			publishers: [
+				sshPublisherDesc(
+					configName: serverName,
+					transfers: [
+						sshTransfer(
+							sourceFiles: jarPath,
+							removePrefix: new File(jarPath).parent,
+							remoteDirectory: env.PROD_REMOTE_DIR,
+							execCommand: """#!/bin/bash
+set -e
+
+cd ${env.PROD_DEPLOY_DIR}
+
+echo "[${serverName}] 当前目录: \$(pwd)"
+
+# 备份旧版本
+if [ -f ${env.JAR_NAME} ]; then
+    BACKUP_NAME="${env.JAR_NAME}.backup.\$(date +%Y%m%d_%H%M%S)"
+    echo "[${serverName}] 备份旧版本: \$BACKUP_NAME"
+    cp ${env.JAR_NAME} \$BACKUP_NAME
+
+    # 只保留最近5个备份
+    ls -t ${env.JAR_NAME}.backup.* 2>/dev/null | tail -n +6 | xargs rm -f 2>/dev/null || true
+
+    echo "[${serverName}] 备份完成，保留最近5个备份"
+    ls -lh ${env.JAR_NAME}.backup.* 2>/dev/null || echo "无历史备份"
+fi
+
+# 部署新版本
+NEW_JAR_FILE="\$(basename ${jarPath})"
+echo "[${serverName}] 查找新文件: \$NEW_JAR_FILE"
+
+if [ -f "\$NEW_JAR_FILE" ]; then
+    echo "[${serverName}] 部署新版本: \$NEW_JAR_FILE -> ${env.JAR_NAME}"
+    mv "\$NEW_JAR_FILE" ${env.JAR_NAME}
+elif [ -f ${env.JAR_NAME} ]; then
+    echo "[${serverName}] ⚠️  新文件未找到，但目标文件已存在，继续启动"
+else
+    echo "[${serverName}] ❌ 错误: 找不到 JAR 文件"
+    ls -la
+    exit 1
+fi
+
+# 验证文件
+echo "[${serverName}] 验证部署文件:"
+ls -lh ${env.JAR_NAME}
+md5sum ${env.JAR_NAME}
+
+# 启动服务
+echo "[${serverName}] 启动服务..."
+if [ -f ./start.sh ]; then
+    chmod +x ./start.sh
+    ./start.sh
+    echo "[${serverName}] ✅ 启动脚本执行完成"
+else
+    echo "[${serverName}] ❌ 错误: start.sh 不存在"
+    exit 1
+fi
+
+echo "[${serverName}] ✅ 部署完成"
+"""
+						)
+					]
+				)
+			]
+		)
+
+		// 健康检查
+		echo "[${serverName}] ⏳ 等待服务启动（15秒）..."
+		sleep(time: 15, unit: 'SECONDS')
+
+		def maxRetries = 6  // 最多检查6次
+		def retryInterval = 10  // 每次间隔10秒
+		def healthy = false
+
+		for (int i = 1; i <= maxRetries; i++) {
+			echo "[${serverName}] 健康检查 (${i}/${maxRetries})..."
+
+			if (checkServerHealth(serverName)) {
+				healthy = true
+				echo "✅ [${serverName}] 部署成功，服务健康"
+				break
+			}
+
+			if (i < maxRetries) {
+				echo "[${serverName}] ⏳ 服务未就绪，${retryInterval}秒后重试..."
+				sleep(time: retryInterval, unit: 'SECONDS')
+			}
+		}
+
+		if (!healthy) {
+			error("❌ [${serverName}] 健康检查失败，服务可能未正常启动")
+		}
+
+	} catch (Exception e) {
+		echo "❌ [${serverName}] 部署失败: ${e.message}"
+		throw e
+	}
+}
+
+// 检查服务器健康状态
+def checkServerHealth(serverName) {
+	try {
+		sshPublisher(
+			continueOnError: false,
+			failOnError: true,
+			publishers: [
+				sshPublisherDesc(
+					configName: serverName,
+					transfers: [
+						sshTransfer(
+							execCommand: """#!/bin/bash
+APP_NAME="${env.JAR_NAME}"
+
+# 检查进程
+PID=\$(ps -ef | grep "\$APP_NAME" | grep -v grep | awk '{print \$2}')
+
+if [ -z "\$PID" ]; then
+    echo "[${serverName}] ❌ 进程不存在"
+    exit 1
+fi
+
+echo "[${serverName}] ✅ 进程运行中, PID: \$PID"
+
+# 检查进程运行时间（确保不是刚启动就崩溃）
+PROCESS_TIME=\$(ps -p \$PID -o etime= | tr -d ' ')
+echo "[${serverName}] 进程运行时间: \$PROCESS_TIME"
+
+# 检查内存使用
+MEMORY=\$(ps -p \$PID -o rss= | tr -d ' ')
+MEMORY_MB=\$((MEMORY / 1024))
+echo "[${serverName}] 内存使用: \${MEMORY_MB} MB"
+
+# 可选: 检查端口（根据你的实际端口修改）
+# PORT=8080
+# if netstat -tlnp 2>/dev/null | grep \$PID | grep \$PORT > /dev/null; then
+#     echo "[${serverName}] ✅ 端口 \$PORT 正常监听"
+# else
+#     echo "[${serverName}] ❌ 端口 \$PORT 未监听"
+#     exit 1
+# fi
+
+# 可选: 检查 HTTP 健康检查接口
+# HEALTH_URL="http://localhost:8080/actuator/health"
+# if curl -f -s -m 5 \$HEALTH_URL > /dev/null 2>&1; then
+#     echo "[${serverName}] ✅ 健康检查接口正常"
+# else
+#     echo "[${serverName}] ⚠️  健康检查接口异常（可能服务还在启动中）"
+#     exit 1
+# fi
+
+echo "[${serverName}] ✅ 健康检查通过"
+exit 0
+"""
+						)
+					]
+				)
+			]
+		)
+
+		return true
+
+	} catch (Exception e) {
+		echo "⚠️  [${serverName}] 健康检查异常: ${e.message}"
+		return false
+	}
+}

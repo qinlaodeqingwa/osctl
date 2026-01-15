@@ -1,0 +1,99 @@
+// 定义 Pipeline 参数，允许用户在运行时选择拉取代码的分支、标签等信息
+properties([
+	parameters([
+		// 布尔参数：是否要渲染页面，默认值为 false，勾选为 true
+		booleanParam(name: 'rendering', defaultValue: false, description: '是否要渲染页面'),
+		// 字符串参数：输入 Git 分支名称，默认值为 'master'，trim 去除首尾空格
+		string(name: 'git_branch', defaultValue: 'master', description: '请输入代码分支', trim: true),
+		// 字符串参数：输入 Git 标签名称，默认值为空，trim 去除首尾空格
+		string(name: 'git_tag', defaultValue: '', description: '请输入代码TAG', trim: true),
+		// 字符串参数：输入镜像地址，默认值为空，trim 去除首尾空格
+		string(name: 'image', defaultValue: '', description: '请输入完整的镜像地址', trim: true),
+		// 隐藏参数：项目名称，默认值为 'go-starter'，用户不可见也不可修改
+		hidden(name: 'project_name', defaultValue: 'go-starter', description: '隐藏参数不给修改'),
+		// harbor私库地址
+		hidden(name: 'harbor_registry', defaultValue: 'harbor.labworlds.cc', description: '隐藏参数不给修改'),
+		// 扩展选择参数：多选主机 IP，支持勾选多个选项，用逗号分隔
+		extendedChoice(
+			name: 'hosts',
+			type: 'PT_CHECKBOX',
+			value: '192.168.110.8,192.168.110.171,192.168.110.172',
+			description: '请选择主机',
+			multiSelectDelimiter: ','
+		),
+		// 字符串参数：输入 Docker 运行命令，默认值已提供，trim 去除首尾空格
+		string(name: 'docker_run', defaultValue: 'docker run -d -p 9006:8080 --restart=always', description: '请输入Docker运行命令', trim: true),
+	])
+])
+pipeline {
+	agent {node 'node-192.168.241.30'}
+	options {
+		// 保留最近 30 个构建记录，防止日志过多占用空间
+		buildDiscarder(logRotator(numToKeepStr: '30'))
+		// 禁止并行构建，确保一次只运行一个构建
+		disableConcurrentBuilds()
+		// 启用 ANSI 颜色输出，日志显示更美观
+		ansiColor('xterm')
+	}
+	environment {
+		image_tag = getBuildTag()
+		branch = null
+	}
+	stages {
+		stage('Git clone') {
+			when {
+				expression { params.rending == false && (params.git_brach != "" || params.git_tag != "") }
+			}
+			steps {
+				script {
+					if (params.git_tag != ""){
+						checkout([$class: 'GitSCM',
+							branches: [[name:"refs/tags/${params.git_tag}"]],
+							doGenerateSumoduleConfigurations: false,
+							extension: [],
+							userRemoteConfigs: [[
+								credentialsId: '',
+								url: ''
+							]]
+						])
+						brach = params.git_tag
+					}else {
+						git credentialsId:'',url:''
+						brach = params.git_branch
+					}
+				}
+			}
+		}
+		stage('Build Image') {
+			when {
+				experssion { params.rendering == false &&(params.git_brach != "" || params.git_tag != "") }
+			}
+			steps {
+				def docker_image_name = "${params.harbor_registry}/${params.project_name}/${branch}:${image_tag}"
+				sh "docker build -t ${docker_image_name} ."
+				sh "docker push ${docker_image_name}"
+				sh "docker rmi ${docker_image_name}"
+			}
+		}
+		stage('Deploy') {
+			when {
+				expression { params.rending == false }
+			}
+			steps {
+				script{
+					sh
+					"""
+                        python3 /home/ubuntu/PyDockerDeploy/deployer.py \
+                            -p "${params.project_name}" \
+                            --git_branch "${branch}" \
+                            --image_tag "${image_tag}" \
+                            --image "${params.image}" \
+                            --hosts "${params.hosts}" \
+                            --harbor_registry "${params.harbor_registry}" \
+                            --docker_run "${params.docker_run}"
+                    """
+				}
+			}
+		}
+	}
+}

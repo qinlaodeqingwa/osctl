@@ -1,0 +1,475 @@
+def getBuildTag() {
+	return new Date().format('MMddHH') + "-${env.BUILD_ID}"
+}
+	
+properties([
+	parameters([
+		string(
+			name: 'git_branch',
+			defaultValue: 'master',
+			description: '请输入代码分支',
+			trim: true
+		),
+		hidden(
+			name: 'project_name',
+			defaultValue: 'cache-service',
+			description: '项目名称（隐藏参数）'
+		),
+		hidden(
+			name: 'ssh_server_name',
+			defaultValue: '开发-业务平台',
+			description: 'SSH服务器配置名称（隐藏参数）'
+		),
+		hidden(
+			name: 'remote_deploy_path',
+			defaultValue: '/data/zcf-busi-middle-office/cache-service',
+			description: '远程部署路径（隐藏参数）'
+		),
+		booleanParam(
+			name: 'skip_tests',
+			defaultValue: true,
+			description: '是否跳过单元测试'
+		),
+		booleanParam(
+			name: 'clean_workspace',
+			defaultValue: true,
+			description: '构建前是否清理工作空间'
+		)
+	])
+])
+
+pipeline {
+	agent any
+	options {
+		// 保留最近 1 个构建记录（根据您的原始配置）
+		buildDiscarder(logRotator(numToKeepStr: '1'))
+		// 禁止并行构建，确保一次只运行一个构建
+		disableConcurrentBuilds()
+		// 启用 ANSI 颜色输出，日志显示更美观
+		ansiColor('xterm')
+		// 设置超时时间：30 分钟
+		timeout(time: 30, unit: 'MINUTES')
+		// 禁用默认的 checkout，手动控制
+		skipDefaultCheckout(true)
+	}
+	environment {
+		MAVEN_OPTS = '-Xmx1024m'
+		APP_NAME = 'cache-service'
+		JAR_NAME = "${APP_NAME}.jar"
+		GIT_CREDENTIALS_ID = 'aliyun-codeup-credentials'
+		GIT_REPO_URL = 'https://codeup.aliyun.com/your-org/your-repo.git'
+	}
+	stages {
+		stage('Preparation') {
+			steps {
+				script {
+					echo """
+                    ╔═══════════════════════════════════════════════════════════╗
+                    ║                    🚀 构建信息                             ║
+                    ╠═══════════════════════════════════════════════════════════╣
+                    ║  项目名称: ${params.project_name}
+                    ║  Git 分支: ${params.git_branch}
+                    ║  跳过测试: ${params.skip_tests}
+                    ║  清理空间: ${params.clean_workspace}
+                    ║  构建编号: ${env.BUILD_NUMBER}
+                    ║  构建标签: ${getBuildTag()}
+                    ║  SSH 服务器: ${params.ssh_server_name}
+                    ║  部署路径: ${params.remote_deploy_path}
+                    ╚═══════════════════════════════════════════════════════════╝
+                    """
+					if (params.clean_workspace) {
+						echo "##########清理工作空间..."
+						deleteDir()
+					} else {
+						echo "###########跳过清理工作空间"
+					}
+				}
+			}
+		}
+		stage('Git Clone') {
+			when {
+				expression { params.git_branch != "" }
+			}
+			steps {
+				script {
+					echo "###################开始克隆代码..."
+					echo "   分支: ${params.git_branch}"
+					echo "   仓库: ${env.GIT_REPO_URL}"
+					checkout([
+						$class: 'GitSCM',
+						branches: [[name: "*/${params.git_branch}"]],
+						doGenerateSubmoduleConfigurations: false,
+						extensions: [],
+						userRemoteConfigs: [[
+							credentialsId: "${env.GIT_CREDENTIALS_ID}",
+							url: "${env.GIT_REPO_URL}"
+						]]
+					])
+					sh 'echo "最新提交信息："'
+					sh 'git log -1 --oneline'
+					sh 'git log -1 --pretty=format:"   作者: %an%n   时间: %ad%n   说明: %s" --date=format:"%Y-%m-%d %H:%M:%S"'
+				}
+			}
+		}
+		stage('Maven Build') {
+			when {
+				expression { params.git_branch != "" }
+			}
+			steps {
+				script {
+					echo "#######开始 Maven 构建..."
+					echo "#######模块: ${env.APP_NAME}"
+					echo "#######跳过测试: ${params.skip_tests}"
+
+					def skipTestsFlag = params.skip_tests ? '-DskipTests' : ''
+					sh """
+                        mvn clean package \
+                            -f pom.xml \
+                            -pl ${env.APP_NAME} \
+                            -am \
+                            ${skipTestsFlag}
+                    """
+					echo "✅ Maven 构建完成"
+				}
+			}
+		}
+
+		stage('Verify Build') {
+			when {
+				expression { params.git_branch != "" }
+			}
+			steps {
+				script {
+					echo "🔍 验证构建结果..."
+
+					// 获取当前构建对象
+					def build = currentBuild.rawBuild
+					def buildLog = new StringWriter()
+
+					// 读取构建日志
+					build.logFile.eachLine { line ->
+						buildLog.write(line)
+					}
+					if (buildLog.toString().contains("BUILD SUCCESS")) {
+						currentBuild.result = 'SUCCESS'
+						echo "#########Maven 构建成功，已强制更新构建状态为 SUCCESS"
+					} else {
+						echo "#########Maven 构建未成功，不更新状态"
+						error("Maven 构建失败")
+					}
+
+					def jarExists = sh(
+						script: "test -f ${env.APP_NAME}/target/${env.JAR_NAME} && echo 'true' || echo 'false'",
+						returnStdout: true
+					).trim()
+
+					if (jarExists == 'true') {
+						echo "#########JAR 文件生成成功: ${env.APP_NAME}/target/${env.JAR_NAME}"
+						sh "ls -lh ${env.APP_NAME}/target/${env.JAR_NAME}"
+					} else {
+						error("########JAR 文件不存在: ${env.APP_NAME}/target/${env.JAR_NAME}")
+					}
+				}
+			}
+		}
+		stage('Deploy Confirm') {
+			when {
+				expression { params.git_branch != "" }
+			}
+			steps {
+				script {
+					echo "###########等待部署确认..."
+					input(
+						message: """
+╔═══════════════════════════════════════════════════════════╗
+║                       准备部署                             ║
+╠═══════════════════════════════════════════════════════════╣
+║  项目: ${params.project_name}								║
+║  分支: ${params.git_branch}								║
+║  服务器: ${params.ssh_server_name}							║
+║  路径: ${params.remote_deploy_path}						║
+╚═══════════════════════════════════════════════════════════╝
+
+是否确认部署？
+                        """,
+						ok: "确认部署"
+					)
+
+					echo "############部署已确认，继续执行..."
+				}
+			}
+		}
+		stage('Stop Remote Service') {
+			when {
+				expression {
+					params.git_branch != "" &&
+					(currentBuild.result == null || currentBuild.result == 'SUCCESS')
+				}
+			}
+			steps {
+				script {
+					echo "########停止远程服务..."
+					echo "########服务器: ${params.ssh_server_name}"
+					echo "########应用名称: ${env.JAR_NAME}"
+					sshPublisher(
+						publishers: [
+							sshPublisherDesc(
+								configName: "${params.ssh_server_name}",
+								transfers: [
+									sshTransfer(
+										execCommand: """#!/bin/bash
+
+# ============================================================================
+# 停止服务脚本
+# ============================================================================
+
+# 定义变量
+APP_NAME="${env.JAR_NAME}"
+MAX_RETRIES=2
+SLEEP_TIME=10
+
+echo "=========================================="
+echo "停止服务: \$APP_NAME"
+echo "=========================================="
+
+# 获取所有进程 PID
+PIDS=(\$(ps -ef | grep "\$APP_NAME" | grep -v grep | awk '{print \$2}'))
+
+# 如果存在进程，尝试 kill
+if [ \${#PIDS[@]} -gt 0 ]; then
+    echo "✓ 发现 \${#PIDS[@]} 个 \$APP_NAME 进程"
+    echo "  PIDs: \${PIDS[*]}"
+    echo "  开始终止进程..."
+
+    # 尝试终止所有进程
+    for pid in "\${PIDS[@]}"; do
+        echo "  → 终止进程 PID: \$pid"
+        kill \$pid
+    done
+
+    # 循环检测进程是否已终止
+    RETRY=0
+    while [ \$RETRY -lt \$MAX_RETRIES ]; do
+        sleep \$SLEEP_TIME
+        REMAINING_PIDS=(\$(ps -ef | grep "\$APP_NAME" | grep -v grep | awk '{print \$2}'))
+
+        if [ \${#REMAINING_PIDS[@]} -eq 0 ]; then
+            echo "✓ 所有 \$APP_NAME 进程已成功终止"
+            exit 0
+        else
+            echo "⚠ 仍有 \${#REMAINING_PIDS[@]} 个进程存在 (PIDs: \${REMAINING_PIDS[*]})"
+            echo "  重试 \$((RETRY+1))/\$MAX_RETRIES..."
+            for pid in "\${REMAINING_PIDS[@]}"; do
+                echo "  → 再次终止进程 PID: \$pid"
+                kill \$pid
+            done
+            RETRY=\$((RETRY+1))
+        fi
+    done
+
+    # 如果达到最大重试次数仍存在进程，报错退出
+    echo "✗ 错误: 尝试 \$MAX_RETRIES 次后仍有 \${#REMAINING_PIDS[@]} 个进程无法终止"
+    echo "  残留 PIDs: \${REMAINING_PIDS[*]}"
+    exit 1
+else
+    echo "✓ \$APP_NAME 进程不存在，无需停止"
+    exit 0
+fi
+"""
+									)
+								]
+							)
+						]
+					)
+
+					echo "#############远程服务已停止"
+				}
+			}
+		}
+		stage('Deploy Application') {
+			when {
+				expression {
+					params.git_branch != "" &&
+					(currentBuild.result == null || currentBuild.result == 'SUCCESS')
+				}
+			}
+			steps {
+				script {
+					echo "#########开始部署应用..."
+					echo "#########源文件: ${env.APP_NAME}/target/${env.JAR_NAME}"
+					echo "#########目标服务器: ${params.ssh_server_name}"
+					echo "#########目标路径: ${params.remote_deploy_path}"
+
+					sshPublisher(
+						publishers: [
+							sshPublisherDesc(
+								configName: "${params.ssh_server_name}",
+								transfers: [
+									sshTransfer(
+										sourceFiles: "**/${env.JAR_NAME}",
+										removePrefix: "${env.APP_NAME}/target",
+										remoteDirectory: "busi-middle-office/${env.APP_NAME}/",
+										execCommand: """#!/bin/bash
+
+# ============================================================================
+# 启动服务脚本
+# ============================================================================
+
+echo "=========================================="
+echo "启动服务: ${env.JAR_NAME}"
+echo "=========================================="
+
+# 切换到部署目录
+cd ${params.remote_deploy_path}
+
+# 检查启动脚本是否存在
+if [ ! -f start.sh ]; then
+    echo "✗ 错误: start.sh 不存在"
+    exit 1
+fi
+
+# 赋予执行权限
+chmod +x start.sh
+
+# 执行启动脚本
+echo "✓ 执行启动脚本..."
+./start.sh
+
+# 等待服务启动
+sleep 5
+
+# 检查服务是否启动成功
+PIDS=\$(ps -ef | grep "${env.JAR_NAME}" | grep -v grep | awk '{print \$2}')
+
+if [ -n "\$PIDS" ]; then
+    echo "✓ 服务启动成功"
+    echo "  PID: \$PIDS"
+    exit 0
+else
+    echo "✗ 服务启动失败"
+    exit 1
+fi
+"""
+									)
+								]
+							)
+						]
+					)
+
+					echo "#########应用部署完成"
+				}
+			}
+		}
+		stage('Health Check') {
+			when {
+				expression {
+					params.git_branch != "" &&
+					(currentBuild.result == null || currentBuild.result == 'SUCCESS')
+				}
+			}
+			steps {
+				script {
+					echo "🏥 开始健康检查..."
+					echo "   等待 10 秒后检查服务状态..."
+
+					// 等待服务完全启动
+					sleep(time: 10, unit: 'SECONDS')
+
+					// 检查远程服务状态
+					sshPublisher(
+						publishers: [
+							sshPublisherDesc(
+								configName: "${params.ssh_server_name}",
+								transfers: [
+									sshTransfer(
+										execCommand: """#!/bin/bash
+# ============================================================================
+# 健康检查脚本
+# ============================================================================
+
+APP_NAME="${env.JAR_NAME}"
+
+echo "=========================================="
+echo "健康检查: \$APP_NAME"
+echo "=========================================="
+
+# 检查进程是否存在
+PIDS=\$(ps -ef | grep "\$APP_NAME" | grep -v grep | awk '{print \$2}')
+
+if [ -n "\$PIDS" ]; then
+    echo "✓ 服务运行正常"
+    echo "  PID: \$PIDS"
+
+    # 显示进程详细信息
+    echo ""
+    echo "进程详情:"
+    ps -ef | grep "\$APP_NAME" | grep -v grep
+
+    # 显示端口监听情况（如果有）
+    echo ""
+    echo "端口监听:"
+    netstat -tlnp 2>/dev/null | grep "\$PIDS" || echo "  (无法获取端口信息)"
+
+    exit 0
+else
+    echo "✗ 服务未运行"
+    echo ""
+    echo "最近日志:"
+    tail -n 50 ${params.remote_deploy_path}/logs/*.log 2>/dev/null || echo "  (无法读取日志)"
+    exit 1
+fi
+"""
+									)
+								]
+							)
+						]
+					)
+
+					echo "#########健康检查通过"
+				}
+			}
+		}
+	}
+	post {
+		success {
+			script {
+				echo """
+╔═══════════════════════════════════════════════════════════╗
+║                    ✅ 构建部署成功                         ║
+╠═══════════════════════════════════════════════════════════╣
+║  项目: ${params.project_name}
+║  分支: ${params.git_branch}
+║  构建号: ${env.BUILD_NUMBER}
+║  构建标签: ${getBuildTag()}
+║  服务器: ${params.ssh_server_name}
+║  部署路径: ${params.remote_deploy_path}
+║  耗时: ${currentBuild.durationString.replace(' and counting', '')}
+╚═══════════════════════════════════════════════════════════╝
+                """
+			}
+		}
+		failure {
+			script {
+				echo """
+╔═══════════════════════════════════════════════════════════╗
+║                    ❌ 构建部署失败                         ║
+╠═══════════════════════════════════════════════════════════╣
+║  项目: ${params.project_name}
+║  分支: ${params.git_branch}
+║  构建号: ${env.BUILD_NUMBER}
+║  失败阶段: ${env.STAGE_NAME}
+║  错误信息: 请查看控制台输出
+╚═══════════════════════════════════════════════════════════╝
+                """
+			}
+		}
+		always {
+			script {
+				echo "   Pipeline 执行完成"
+				echo "   开始时间: ${new Date(currentBuild.startTimeInMillis).format('yyyy-MM-dd HH:mm:ss')}"
+				echo "   结束时间: ${new Date().format('yyyy-MM-dd HH:mm:ss')}"
+				echo "   总耗时: ${currentBuild.durationString.replace(' and counting', '')}"
+			}
+		}
+	}
+}

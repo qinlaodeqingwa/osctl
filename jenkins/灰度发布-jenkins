@@ -1,0 +1,2120 @@
+properties([
+	parameters([
+		[$class: 'ChoiceParameter',
+			choiceType: 'PT_SINGLE_SELECT',
+			name: 'PROJECT',
+			script: [
+				$class: 'GroovyScript',
+				script: [
+					sandbox: false,
+					script: '''
+                        def artifactsDir = '/data/artifacts'
+                        def projects = []
+
+                        try {
+                            def backendDir = new File("${artifactsDir}/backend")
+                            if (backendDir.exists()) {
+                                backendDir.listFiles()?.each { projectDir ->
+                                    if (projectDir.isDirectory()) {
+                                        projects << "[后端] ${projectDir.name}"
+                                    }
+                                }
+                            }
+
+                            def frontendDir = new File("${artifactsDir}/frontend")
+                            if (frontendDir.exists()) {
+                                frontendDir.listFiles()?.each { projectDir ->
+                                    if (projectDir.isDirectory()) {
+                                        projects << "[前端] ${projectDir.name}"
+                                    }
+                                }
+                            }
+
+                            return projects.isEmpty() ? ['没有可用的项目'] : projects.sort()
+                        } catch (Exception e) {
+                            return ['ERROR: ' + e.message]
+                        }
+                    '''
+				]
+			],
+			description: '选择要部署的项目'
+		],
+		[$class: 'CascadeChoiceParameter',
+			choiceType: 'PT_CHECKBOX',
+			name: 'MODULES',
+			referencedParameters: 'PROJECT',
+			script: [
+				$class: 'GroovyScript',
+				script: [
+					sandbox: false,
+					script: '''
+                        def artifactsDir = '/data/artifacts'
+
+                        try {
+                            def match = PROJECT =~ /^\\[(后端|前端)\\]\\s+(.+)$/
+                            if (!match.find()) {
+                                return ['ERROR: 项目格式错误']
+                            }
+
+                            def projectType = match.group(1)
+                            def projectName = match.group(2)
+
+                            if (projectType == '前端') {
+                                return ['FRONTEND_NO_MODULES']
+                            }
+
+                            def projectDir = new File("${artifactsDir}/backend/${projectName}")
+                            if (!projectDir.exists()) {
+                                return ['ERROR: 项目目录不存在']
+                            }
+
+                            def modules = []
+                            projectDir.listFiles()?.each { moduleDir ->
+                                if (moduleDir.isDirectory()) {
+                                    modules << moduleDir.name
+                                }
+                            }
+
+                            return modules.isEmpty() ? ['ERROR: 没有可用的模块'] : modules.sort()
+                        } catch (Exception e) {
+                            return ['ERROR: ' + e.message]
+                        }
+                    '''
+				]
+			],
+			description: '选择要部署的模块（后端项目可多选）'
+		],
+		[$class: 'DynamicReferenceParameter',
+			choiceType: 'ET_FORMATTED_HTML',
+			name: 'MODULE_VERSION_SELECTORS',
+			referencedParameters: 'PROJECT,MODULES',
+			script: [
+				$class: 'GroovyScript',
+				script: [
+					sandbox: false,
+					script: '''
+                def artifactsDir = '/data/artifacts'
+
+                try {
+                    def projectMatch = PROJECT =~ /^\\[(后端|前端)\\]\\s+(.+)$/
+                    if (!projectMatch.find()) {
+                        return '<div style="color: red;">项目格式错误</div>'
+                    }
+
+                    def projectType = projectMatch.group(1)
+                    def projectName = projectMatch.group(2)
+
+                    if (projectType == '前端') {
+                        def frontendDir = new File("${artifactsDir}/frontend/${projectName}")
+
+                        if (!frontendDir.exists()) {
+                            return '<div style="padding: 10px; background: #fff3cd; border-radius: 5px;">⚠️ 前端项目目录不存在</div>'
+                        }
+
+                        def tarFiles = frontendDir.listFiles()?.findAll { file ->
+                            file.isFile() && file.name.endsWith('.tar.gz')
+                        }?.sort { a, b -> b.lastModified() <=> a.lastModified() }
+
+                        if (!tarFiles || tarFiles.isEmpty()) {
+                            return '<div style="padding: 10px; background: #fff3cd; border-radius: 5px;">⚠️ 未找到前端构建产物</div>'
+                        }
+
+                        def html = new StringBuilder()
+                        html.append('<div style="font-family: Arial, sans-serif; padding: 15px; background: #f8f9fa; border-radius: 5px;">')
+                        html.append('<h3 style="margin-top: 0; color: #333;">🌐 选择前端版本</h3>')
+                        html.append('<div style="color: #666; margin-bottom: 15px;">项目: <strong>' + projectName + '</strong> | 共 ' + tarFiles.size() + ' 个版本</div>')
+
+                        html.append('<div style="background: white; padding: 15px; border: 1px solid #ddd; border-radius: 5px; max-height: 500px; overflow-y: auto;">')
+                        html.append('<table style="width: 100%; border-collapse: collapse;">')
+                        html.append('<thead style="position: sticky; top: 0; background: white; z-index: 10;">')
+                        html.append('<tr style="background: #f5f5f5;">')
+                        html.append('<th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd; width: 40px;"></th>')
+                        html.append('<th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd;">版本</th>')
+                        html.append('<th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd;">构建时间</th>')
+                        html.append('<th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd;">大小</th>')
+                        html.append('</tr>')
+                        html.append('</thead>')
+                        html.append('<tbody>')
+
+                        tarFiles.eachWithIndex { file, index ->
+                            def fileName = file.name
+                            def date = new Date(file.lastModified()).format('yyyy-MM-dd HH:mm:ss')
+                            def sizeMB = file.length() / 1024.0 / 1024.0
+                            def size = String.format('%.2f MB', sizeMB)
+
+                            def versionDisplay = fileName.replace('.tar.gz', '')
+
+                            def rowStyle = index == 0 ? 'background: #e3f2fd;' : (index % 2 == 0 ? 'background: #fafafa;' : '')
+                            def badge = index == 0 ? '<span style="background: #4CAF50; color: white; padding: 2px 8px; border-radius: 3px; font-size: 11px; margin-left: 8px;">最新</span>' : ''
+
+                            html.append('<tr style="' + rowStyle + '">')
+                            html.append('<td style="padding: 10px; border-bottom: 1px solid #eee; text-align: center;">')
+                            html.append('<input type="radio" name="value" value="frontend:' + fileName + '"' + (index == 0 ? ' checked' : '') + '>')
+                            html.append('</td>')
+                            html.append('<td style="padding: 10px; border-bottom: 1px solid #eee; font-family: Consolas, monospace; font-size: 13px;">')
+                            html.append(versionDisplay + badge)
+                            html.append('</td>')
+                            html.append('<td style="padding: 10px; border-bottom: 1px solid #eee; color: #666;">' + date + '</td>')
+                            html.append('<td style="padding: 10px; border-bottom: 1px solid #eee; color: #666; font-weight: 500;">' + size + '</td>')
+                            html.append('</tr>')
+                        }
+
+                        html.append('</tbody>')
+                        html.append('</table>')
+
+                        html.append('<div style="margin-top: 15px; padding: 12px; background: #fff3cd; border-left: 4px solid #ff9800; border-radius: 3px;">')
+                        html.append('<strong>💡 提示：</strong> 默认选中最新版本，点击其他行可切换版本')
+                        html.append('</div>')
+
+                        html.append('</div>')
+                        html.append('</div>')
+
+                        return html.toString()
+                    }
+
+                    if (!MODULES || MODULES.trim().isEmpty() || MODULES == '(前端项目无需选择模块)') {
+                        return '<div style="padding: 10px; background: #fff3cd; border-radius: 5px;">⚠️ 请先选择模块</div>'
+                    }
+
+                    def selectedModules = MODULES.split(',').collect { it.trim() }.findAll { it }
+
+                    if (selectedModules.isEmpty()) {
+                        return '<div style="padding: 10px; background: #fff3cd; border-radius: 5px;">⚠️ 请先选择模块</div>'
+                    }
+
+                    def html = new StringBuilder()
+                    html.append('<div style="font-family: Arial, sans-serif; padding: 15px; background: #f8f9fa; border-radius: 5px;">')
+                    html.append('<h3 style="margin-top: 0; color: #333;">📦 为每个模块选择版本</h3>')
+                    html.append('<div style="color: #666; margin-bottom: 15px;">项目: <strong>' + projectName + '</strong> | 已选择 ' + selectedModules.size() + ' 个模块</div>')
+
+                    selectedModules.eachWithIndex { module, moduleIndex ->
+                        def artifactPath = artifactsDir + '/backend/' + projectName + '/' + module
+                        def dir = new File(artifactPath)
+
+                        html.append('<div style="margin-bottom: 20px; padding: 0; background: white; border: 1px solid #ddd; border-radius: 5px; overflow: hidden;">')
+
+                        html.append('<div style="padding: 12px 15px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; font-weight: bold; font-size: 15px;">')
+                        html.append('<span style="background: rgba(255,255,255,0.2); padding: 2px 8px; border-radius: 3px; margin-right: 10px;">' + (moduleIndex + 1) + '</span>')
+                        html.append(module)
+                        html.append('</div>')
+
+                        if (!dir.exists()) {
+                            html.append('<div style="padding: 15px; color: #dc3545;">❌ 模块目录不存在</div>')
+                        } else {
+                            def files = dir.listFiles()?.findAll { file ->
+                                file.isFile() && file.name.endsWith('.jar')
+                            }
+
+                            if (!files || files.isEmpty()) {
+                                html.append('<div style="padding: 15px; color: #dc3545;">❌ 没有可用版本</div>')
+                            } else {
+                                files.sort { a, b -> b.lastModified() <=> a.lastModified() }
+
+                                html.append('<div style="padding: 15px;">')
+                                html.append('<select name="value" style="width: 100%; padding: 10px; font-size: 14px; border: 1px solid #ccc; border-radius: 4px; background: white;">')
+
+                                files.eachWithIndex { file, index ->
+                                    def fileName = file.name
+
+                                    def version = fileName
+                                    def date = new Date(file.lastModified()).format('yyyy-MM-dd HH:mm:ss')
+                                    def sizeMB = file.length() / 1024.0 / 1024.0
+                                    def size = String.format('%.2f MB', sizeMB)
+
+                                    def badge = index == 0 ? ' 🌟 最新' : ''
+                                    def selected = index == 0 ? ' selected' : ''
+
+                                    html.append('<option value="' + module + ':' + version + '"' + selected + '>')
+                                    html.append(version + badge + ' (' + date + ', ' + size + ')')
+                                    html.append('</option>')
+                                }
+
+                                html.append('</select>')
+
+                                html.append('<div style="margin-top: 10px; padding: 10px; background: #f8f9fa; border-left: 3px solid #667eea; border-radius: 3px; color: #666; font-size: 12px;">')
+                                html.append('📊 共 ' + files.size() + ' 个版本可选 | 默认选中最新版本')
+                                html.append('</div>')
+
+                                html.append('</div>')
+                            }
+                        }
+
+                        html.append('</div>')
+                    }
+
+                    html.append('<div style="margin-top: 15px; padding: 12px; background: #e7f3ff; border-left: 4px solid #2196F3; border-radius: 3px;">')
+                    html.append('<strong>💡 提示：</strong> 每个模块默认选中最新版本，可以分别为不同模块选择不同版本')
+                    html.append('</div>')
+
+                    html.append('</div>')
+
+                    return html.toString()
+
+                } catch (Exception e) {
+                    return '<div style="color: red;">读取版本失败: ' + e.message + '</div>'
+                }
+            '''
+				]
+			],
+			description: '选择版本'
+		],
+		[$class: 'DynamicReferenceParameter',
+			choiceType: 'ET_FORMATTED_HTML',
+			name: 'DEPLOY_INSTANCES',
+			referencedParameters: 'PROJECT',
+			script: [
+				$class: 'GroovyScript',
+				script: [
+					sandbox: false,
+					script: '''
+                import groovy.json.JsonSlurper
+
+                def configFile = '/data/deployments/servers-config.json'
+
+                try {
+                    def match = PROJECT =~ /^\\[(后端|前端)\\]\\s+(.+)$/
+                    if (!match.find()) {
+                        return '<input type="hidden" name="value" value="NONE">'
+                    }
+
+                    def projectType = match.group(1)
+                    def projectName = match.group(2)
+
+                    if (projectType == '前端') {
+                        return '<input type="hidden" name="value" value="NONE">'
+                    }
+
+                    def config = new JsonSlurper().parse(new File(configFile))
+                    def projectConfig = config.projects[projectName]
+
+                    if (!projectConfig) {
+                        return '<input type="hidden" name="value" value="SINGLE">'
+                    }
+
+                    if (!projectConfig.instances?.enabled) {
+                        return '<input type="hidden" name="value" value="SINGLE">'
+                    }
+
+                    def instances = projectConfig.instances.list ?: ['instance1', 'instance2']
+                    def defaultInstance = projectConfig.instances.default ?: 'instance2'
+
+                    def uniqueId = "inst_" + System.currentTimeMillis()
+
+                    def html = new StringBuilder()
+                    html.append('<input type="hidden" name="value" id="' + uniqueId + '_value" value="' + defaultInstance + '">')
+
+                    html.append('<div id="' + uniqueId + '_container" style="font-family: Arial, sans-serif; padding: 12px; background: #f8f9fa; border-radius: 6px; border: 1px solid #dee2e6; margin-top: 8px;">')
+                    html.append('<div style="margin-bottom: 12px; font-weight: bold; color: #495057; font-size: 14px;">选择部署实例（灰度发布）：</div>')
+
+                    instances.each { instance ->
+                        def isPrimary = (instance == 'instance1' || instance == 'master')
+                        def badge = isPrimary ? '🔴 主实例' : '🟢 从实例'
+                        def checked = (instance == defaultInstance) ? 'checked' : ''
+                        def tip = isPrimary ? '（生产流量）' : '（灰度流量）'
+                        def bgColor = isPrimary ? '#ffebee' : '#e8f5e9'
+                        def borderColor = isPrimary ? '#ef5350' : '#66bb6a'
+
+                        html.append('<div style="margin: 8px 0; padding: 12px; background: ' + bgColor + '; border-radius: 5px; border-left: 4px solid ' + borderColor + ';">')
+                        html.append("<label style='cursor: pointer; display: flex; align-items: center; user-select: none;'>")
+                        html.append("<input type='checkbox' class='${uniqueId}_cb' data-inst='${instance}' ${checked} style='margin-right: 12px; width: 18px; height: 18px; cursor: pointer;'> ")
+                        html.append("<span style='font-size: 14px;'>${badge} <strong>${instance}</strong> <span style='color: #6c757d;'>${tip}</span></span>")
+                        html.append('</label>')
+                        html.append('</div>')
+                    }
+
+                    html.append('<div style="margin-top: 12px; padding: 10px; background: #fff3cd; border-left: 4px solid #ffc107; border-radius: 4px; font-size: 13px; color: #856404;">')
+                    html.append('<strong>💡 提示：</strong> 可多选，默认选中 <strong>' + defaultInstance + '</strong>（灰度实例）')
+                    html.append('</div>')
+                    html.append('</div>')
+
+                    // JavaScript
+                    html.append('<script>')
+                    html.append('(function() {')
+                    html.append('  var vid = "' + uniqueId + '_value";')
+                    html.append('  var cbs = "' + uniqueId + '_cb";')
+                    html.append('  ')
+                    html.append('  function update() {')
+                    html.append('    var boxes = document.querySelectorAll("." + cbs);')
+                    html.append('    var sel = [];')
+                    html.append('    boxes.forEach(function(b) {')
+                    html.append('      if (b.checked) sel.push(b.getAttribute("data-inst"));')
+                    html.append('    });')
+                    html.append('    var val = sel.length > 0 ? sel.join(",") : "NONE";')
+                    html.append('    var inp = document.getElementById(vid);')
+                    html.append('    if (inp) inp.value = val;')
+                    html.append('  }')
+                    html.append('  ')
+                    html.append('  function init() {')
+                    html.append('    var boxes = document.querySelectorAll("." + cbs);')
+                    html.append('    if (boxes.length === 0) {')
+                    html.append('      setTimeout(init, 100);')
+                    html.append('      return;')
+                    html.append('    }')
+                    html.append('    boxes.forEach(function(b) {')
+                    html.append('      b.addEventListener("change", update);')
+                    html.append('    });')
+                    html.append('    update();')
+                    html.append('  }')
+                    html.append('  ')
+                    html.append('  if (document.readyState === "loading") {')
+                    html.append('    document.addEventListener("DOMContentLoaded", init);')
+                    html.append('  } else {')
+                    html.append('    setTimeout(init, 50);')
+                    html.append('  }')
+                    html.append('})();')
+                    html.append('</script>')
+
+                    return html.toString()
+
+                } catch (Exception e) {
+                    return '<input type="hidden" name="value" value="SINGLE">'
+                }
+            '''
+				]
+			],
+			description: '选择部署实例（可多选）'
+		],
+		[$class: 'DynamicReferenceParameter',
+			choiceType: 'ET_FORMATTED_HTML',
+			name: 'DEPLOY_HOSTS',
+			referencedParameters: 'PROJECT',
+			script: [
+				$class: 'GroovyScript',
+				script: [
+					sandbox: false,
+					script: '''
+                        import groovy.json.JsonSlurper
+
+                        def configFile = '/data/deployments/servers-config.json'
+
+                        try {
+                            def match = PROJECT =~ /^\\[(后端|前端)\\]\\s+(.+)$/
+                            if (!match.find()) {
+                                return '<div style="color:red;">项目格式错误</div>'
+                            }
+
+                            def projectName = match.group(2)
+
+                            def config = new JsonSlurper().parse(new File(configFile))
+                            def projectConfig = config.projects[projectName]
+
+                            if (!projectConfig) {
+                                return '<div style="color:orange;">项目配置不存在</div>'
+                            }
+
+                            if (!projectConfig.hosts || !(projectConfig.hosts instanceof List)) {
+                                return '<input type="hidden" name="value" value="ALL"><div style="color: gray;">单主机项目，无需选择节点</div>'
+                            }
+                            def hosts = projectConfig.hosts
+
+                            def html = new StringBuilder()
+                            html.append('<div style="font-family: monospace;">')
+                            html.append('<div style="margin-bottom: 10px;"><strong>选择部署节点：</strong></div>')
+
+                            hosts.eachWithIndex { hostConfig, idx ->
+                                html.append('<div style="margin: 5px 0;">')
+                                html.append("<label style='cursor: pointer;'>")
+                                html.append("<input type='checkbox' name='host' value='${idx}' checked> ")
+                                html.append("节点 ${idx}: ${hostConfig.name} (${hostConfig.host})")
+                                html.append('</label>')
+                                html.append('</div>')
+                            }
+
+                            html.append('<input type="hidden" name="value" id="hosts_value" value="">')
+                            html.append('<script>')
+                            html.append('(function() {')
+                            html.append('  function updateValue() {')
+                            html.append('    var checkboxes = document.getElementsByName("host");')
+                            html.append('    var selected = [];')
+                            html.append('    for (var i = 0; i < checkboxes.length; i++) {')
+                            html.append('      if (checkboxes[i].checked) {')
+                            html.append('        selected.push(checkboxes[i].value);')
+                            html.append('      }')
+                            html.append('    }')
+                            html.append('    document.getElementById("hosts_value").value = selected.length > 0 ? selected.join(",") : "ALL";')
+                            html.append('  }')
+                            html.append('  var checkboxes = document.getElementsByName("host");')
+                            html.append('  for (var i = 0; i < checkboxes.length; i++) {')
+                            html.append('    checkboxes[i].addEventListener("change", updateValue);')
+                            html.append('  }')
+                            html.append('  updateValue();')
+                            html.append('})();')
+                            html.append('</script>')
+                            html.append('</div>')
+
+                            return html.toString()
+
+                        } catch (Exception e) {
+                            return "<div style='color:red;'>错误: ${e.message}</div>"
+                        }
+                    '''
+				]
+			],
+			description: '选择部署节点'
+		],
+
+		booleanParam(
+			name: 'SKIP_HEALTH_CHECK',
+			defaultValue: false,
+			description: '跳过健康检查'
+		),
+
+		booleanParam(
+			name: 'PARALLEL_DEPLOY',
+			defaultValue: false,
+			description: '并行部署（仅后端多模块）'
+		)
+	])
+])
+
+pipeline {
+	agent any
+
+	environment {
+		CONFIG_FILE = '/data/deployments/servers-config.json'
+		ARTIFACTS_DIR = '/data/artifacts'
+	}
+
+	stages {
+		stage('解析参数') {
+			steps {
+				script {
+					echo "=========================================="
+					echo "📋 解析构建参数"
+					echo "=========================================="
+
+					def projectInfo = parseProjectInfo(params.PROJECT)
+
+					if (!projectInfo) {
+						error "❌ 项目格式错误"
+					}
+
+					env.PROJECT_TYPE_CN = projectInfo.typeCn
+					env.PROJECT_NAME = projectInfo.name
+					env.PROJECT_TYPE = (projectInfo.typeCn == '后端') ? 'backend' : 'frontend'
+
+					echo "项目: ${env.PROJECT_NAME}"
+					echo "类型: ${env.PROJECT_TYPE_CN}"
+					echo ""
+
+					echo "=========================================="
+					echo "📦 解析版本"
+					echo "=========================================="
+
+					def deploymentPlan = [:]
+
+					if (!params.MODULE_VERSION_SELECTORS || params.MODULE_VERSION_SELECTORS.trim().isEmpty()) {
+						error "❌ 请选择版本"
+					}
+
+					echo "📥 原始参数值:"
+					echo "   ${params.MODULE_VERSION_SELECTORS}"
+					echo ""
+
+					if (env.PROJECT_TYPE == 'frontend') {
+						// 前端：frontend:xxx.tar.gz
+						def parts = params.MODULE_VERSION_SELECTORS.trim().split(':', 2)
+						if (parts.length == 2 && parts[0] == 'frontend') {
+							deploymentPlan['frontend'] = parts[1].trim()
+							echo "前端版本: ${parts[1].trim()}"
+						} else {
+							error "❌ 前端版本格式错误，期望格式：frontend:文件名.tar.gz"
+						}
+					} else {
+						def selections = params.MODULE_VERSION_SELECTORS.trim()
+						selections.split(',').each { selection ->
+							def trimmed = selection.trim()
+
+							if (trimmed.isEmpty()) {
+								return
+							}
+							def colonIndex = trimmed.indexOf(':')
+							if (colonIndex > 0) {
+								String module = trimmed.substring(0, colonIndex).trim()
+								String version = trimmed.substring(colonIndex + 1).trim()
+
+								if (!module.isEmpty() && !version.isEmpty()) {
+									deploymentPlan[module] = version
+									echo "  ✓ ${module}"
+									echo "    └─ ${version}"
+								} else {
+									echo "  ⚠️ 跳过无效项: ${trimmed}"
+								}
+							} else {
+								echo "  ⚠️ 跳过格式错误: ${trimmed}"
+							}
+						}
+
+						if (deploymentPlan.isEmpty()) {
+							error """
+❌ 未能解析到任何模块版本
+
+原始输入:
+${params.MODULE_VERSION_SELECTORS}
+
+期望格式:
+module1:file1.jar,module2:file2.jar
+"""
+						}
+					}
+
+					env.DEPLOYMENT_PLAN = writeJSON returnText: true, json: deploymentPlan
+
+					echo ""
+					echo "=========================================="
+					echo "📋 最终部署计划"
+					echo "=========================================="
+					deploymentPlan.each { module, version ->
+						echo "  ${module}:"
+						echo "    ${version}"
+					}
+
+					echo "原始 DEPLOY_INSTANCES 参数: '${params.DEPLOY_INSTANCES}'"
+
+					def config = readJSON file: env.CONFIG_FILE
+					def projectConfig = config.projects[env.PROJECT_NAME]
+
+					def deployInstances = params.DEPLOY_INSTANCES?.trim() ?: 'SINGLE'
+
+					deployInstances = deployInstances.replaceAll(/^,+|,+$/, '')
+					deployInstances = deployInstances.replaceAll(/,{2,}/, ',')
+
+					echo "清理后的值: '${deployInstances}'"
+
+					if (deployInstances == 'NONE' || deployInstances.isEmpty() || env.PROJECT_TYPE == 'frontend') {
+						env.INSTANCE_MODE = 'NONE'
+						env.SELECTED_INSTANCES = 'NONE'
+						echo "前端项目（无实例）"
+					} else if (deployInstances == 'SINGLE' || !projectConfig?.instances?.enabled) {
+						env.INSTANCE_MODE = 'SINGLE'
+						env.SELECTED_INSTANCES = 'SINGLE'
+						echo "单实例项目"
+					} else {
+						env.INSTANCE_MODE = 'MULTI'
+						env.SELECTED_INSTANCES = deployInstances
+
+						def instances = deployInstances.split(',').collect { it.trim() }
+						echo "双实例项目"
+						echo "选择实例: ${instances.join(', ')} (共 ${instances.size()} 个)"
+					}
+
+					echo "=========================================="
+					echo "🖥️ 解析节点"
+					echo "=========================================="
+
+					if (projectConfig?.hosts && projectConfig.hosts instanceof List) {
+						env.SELECTED_HOSTS = params.DEPLOY_HOSTS
+						echo "多主机项目"
+						echo "选择节点: ${env.SELECTED_HOSTS}"
+					} else {
+						env.SELECTED_HOSTS = 'ALL'
+						echo "单主机项目"
+					}
+
+					echo "=========================================="
+					echo "PROJECT_NAME: ${env.PROJECT_NAME}"
+					echo "PROJECT_TYPE: ${env.PROJECT_TYPE}"
+					echo "INSTANCE_MODE: ${env.INSTANCE_MODE}"
+					echo "SELECTED_INSTANCES: ${env.SELECTED_INSTANCES}"
+					echo "SELECTED_HOSTS: ${env.SELECTED_HOSTS}"
+					echo "DEPLOYMENT_PLAN: ${env.DEPLOYMENT_PLAN}"
+					echo "=========================================="
+				}
+			}
+		}
+
+		stage('读取配置') {
+			steps {
+				script {
+					def config = readJSON file: env.CONFIG_FILE
+					def projectConfig = config.projects[env.PROJECT_NAME]
+
+					if (!projectConfig) {
+						error "❌ 项目配置不存在"
+					}
+
+					if (projectConfig.hosts) {
+						env.DEPLOY_MODE = 'MULTI_HOST'
+						def allHosts = projectConfig.hosts
+						def selectedHosts = []
+
+						if (env.SELECTED_HOSTS == 'ALL') {
+							selectedHosts = allHosts
+						} else {
+							def indices = env.SELECTED_HOSTS.split(',').collect { it.trim().toInteger() }
+							indices.each { idx ->
+								if (idx >= 0 && idx < allHosts.size()) {
+									selectedHosts << allHosts[idx]
+								}
+							}
+						}
+
+						env.HOSTS_CONFIG = writeJSON returnText: true, json: selectedHosts
+						env.BASE_DIR = selectedHosts[0].baseDir
+					} else {
+						env.DEPLOY_MODE = 'SINGLE_HOST'
+						env.HOST = projectConfig.host
+						env.USER = projectConfig.user
+						env.BASE_DIR = projectConfig.baseDir
+					}
+				}
+			}
+		}
+
+		stage('检查制品') {
+			steps {
+				script {
+					echo "=========================================="
+					echo "检查所有制品是否存在"
+					echo "=========================================="
+
+					def deploymentPlan = readJSON text: env.DEPLOYMENT_PLAN
+					def missingArtifacts = []
+
+					if (env.PROJECT_TYPE == 'frontend') {
+						def tarFileName = deploymentPlan['frontend']
+						def artifactFile = "${env.ARTIFACTS_DIR}/frontend/${env.PROJECT_NAME}/${tarFileName}"
+
+						if (!fileExists(artifactFile)) {
+							missingArtifacts << "  ❌ ${tarFileName}"
+							echo "  ❌ 前端制品不存在: ${artifactFile}"
+						} else {
+							def fileSize = sh(script: "du -h '${artifactFile}' | cut -f1", returnStdout: true).trim()
+							echo "  ✅ 前端制品 (${tarFileName}): ${fileSize}"
+						}
+					} else {
+						deploymentPlan.each { module, version ->
+							def artifactFile = "${env.ARTIFACTS_DIR}/backend/${env.PROJECT_NAME}/${module}/${version}"
+
+							echo "检查: ${module}"
+							echo "  文件: ${version}"
+							echo "  路径: ${artifactFile}"
+
+							if (!fileExists(artifactFile)) {
+								missingArtifacts << "  ❌ ${module} (${version})"
+								echo "  ❌ 不存在"
+							} else {
+								def fileSize = sh(script: "du -h '${artifactFile}' | cut -f1", returnStdout: true).trim()
+								echo "  ✅ 存在 (${fileSize})"
+							}
+						}
+					}
+
+					if (!missingArtifacts.isEmpty()) {
+						error "❌ 以下制品不存在:\n${missingArtifacts.join('\n')}"
+					}
+
+					echo "=========================================="
+					echo "✅ 所有制品检查通过"
+					echo "=========================================="
+				}
+			}
+		}
+
+		stage('确认发布') {
+			steps {
+				script {
+					def deploymentPlan = readJSON text: env.DEPLOYMENT_PLAN
+
+					def message = """
+========================================
+⚠️  确认发布？
+========================================
+项目: ${env.PROJECT_NAME}
+类型: ${env.PROJECT_TYPE_CN}
+
+部署计划:
+"""
+
+					deploymentPlan.each { key, value ->
+						message += "  - ${key}: ${value}\n"
+					}
+
+					message += "\n"
+
+					if (env.PROJECT_TYPE == 'backend') {
+						if (env.INSTANCE_MODE == 'MULTI') {
+							def instances = env.SELECTED_INSTANCES.split(',').collect { it.trim() }
+							message += "实例模式: 双实例\n"
+							message += "选择实例:\n"
+							instances.each { inst ->
+								def isPrimary = (inst == 'instance1' || inst == 'master')
+								def badge = isPrimary ? '🔴' : '🟢'
+								def tip = isPrimary ? '主实例（生产流量）' : '从实例（灰度流量）'
+								message += "  ${badge} ${inst} ${tip}\n"
+							}
+						} else if (env.INSTANCE_MODE == 'SINGLE') {
+							message += "实例模式: 单实例\n"
+						}
+					}
+
+					message += "\n"
+					if (env.DEPLOY_MODE == 'MULTI_HOST') {
+						def hostsConfig = readJSON text: env.HOSTS_CONFIG
+						def config = readJSON file: env.CONFIG_FILE
+						def allHostsCount = config.projects[env.PROJECT_NAME].hosts.size()
+
+						message += "部署模式: 多主机部署\n"
+						message += "可用节点: ${allHostsCount} 台\n"
+						message += "选择节点: ${hostsConfig.size()} 台\n\n"
+						message += "将要部署到:\n"
+
+						hostsConfig.eachWithIndex { hostConfig, index ->
+							message += "  ${index + 1}. ${hostConfig.name} (${hostConfig.host})\n"
+						}
+					} else {
+						message += "服务器: ${env.HOST}\n"
+					}
+
+					message += "\n"
+					message += "跳过健康检查: ${params.SKIP_HEALTH_CHECK ? '是' : '否'}\n"
+
+					if (env.PROJECT_TYPE == 'backend') {
+						message += "并行发布: ${params.PARALLEL_DEPLOY ? '是' : '否'}\n"
+					}
+
+					message += """
+
+⚠️ 此操作将更新生产环境！
+========================================
+"""
+
+					echo "=========================================="
+					echo "确认发布弹窗内容:"
+					echo "=========================================="
+					echo message
+					echo "=========================================="
+
+					timeout(time: 10, unit: 'MINUTES') {
+						input message: message, ok: '✅ 确认发布'
+					}
+				}
+			}
+		}
+
+
+		stage('执行部署') {
+			steps {
+				script {
+					def currentTime = new Date().format('yyyy-MM-dd HH:mm:ss')
+					def deployedBy = env.BUILD_USER ?: 'jenkins'
+					def buildNum = env.BUILD_NUMBER.toInteger()
+					def deploymentPlan = readJSON text: env.DEPLOYMENT_PLAN
+
+					def deployResults
+
+					try {
+						if (env.PROJECT_TYPE == 'frontend') {
+							deployResults = deployFrontendWithResults(deploymentPlan, currentTime, deployedBy, buildNum)
+						} else {
+							if (params.PARALLEL_DEPLOY && deploymentPlan.size() > 1) {
+								deployResults = deployBackendParallel(deploymentPlan, currentTime, deployedBy, buildNum)
+							} else {
+								deployResults = deployBackendSerial(deploymentPlan, currentTime, deployedBy, buildNum)
+							}
+						}
+
+						env.DEPLOY_RESULTS = writeJSON returnText: true, json: deployResults
+
+					} catch (Exception e) {
+						echo "❌ 部署失败: ${e.message}"
+						throw e
+					}
+				}
+			}
+		}
+
+		stage('更新清单') {
+			steps {
+				script {
+					updateDeploymentManifest()
+				}
+			}
+		}
+	}
+
+	post {
+		success {
+			echo "✅ 部署成功"
+		}
+		failure {
+			echo "❌ 部署失败"
+		}
+	}
+}
+
+@NonCPS
+def createModuleInfo(String version, String currentTime, String deployedBy, int buildNum, String status, String error = null) {
+	def moduleInfo = [
+		version: version,
+		deployTime: currentTime,
+		deployedBy: deployedBy,
+		buildNumber: buildNum,
+		status: status
+	]
+
+	if (error) {
+		moduleInfo.error = error
+	}
+
+	if (env.INSTANCE_MODE == 'MULTI') {
+		def instances = env.SELECTED_INSTANCES.split(',').collect { it.trim() }
+		moduleInfo.instances = [:]
+		instances.each { inst ->
+			moduleInfo.instances[inst] = [
+				version: version,
+				deployTime: currentTime,
+				status: status
+			]
+			if (error) {
+				moduleInfo.instances[inst].error = error
+			}
+		}
+	}
+
+	return moduleInfo
+}
+def deployFrontendWithResults(Map deploymentPlan, String currentTime, String deployedBy, int buildNum) {
+	def deployResults = [:]
+
+	try {
+		deployFrontendProject(deploymentPlan['frontend'])
+
+		def host = env.HOST
+		deployResults[host] = [
+			name: "前端服务器",
+			modules: [
+				frontend: createModuleInfo(
+					deploymentPlan['frontend'],
+					currentTime,
+					deployedBy,
+					buildNum,
+					'success'
+				)
+			],
+			lastDeployTime: currentTime
+		]
+	} catch (Exception e) {
+		echo "❌ 前端部署失败: ${e.message}"
+
+		def host = env.HOST
+		deployResults[host] = [
+			name: "前端服务器",
+			modules: [
+				frontend: createModuleInfo(
+					deploymentPlan['frontend'],
+					currentTime,
+					deployedBy,
+					buildNum,
+					'failed',
+					e.message
+				)
+			],
+			lastDeployTime: currentTime
+		]
+
+		throw e
+	}
+
+	return deployResults
+}
+def deployBackendParallel(Map deploymentPlan, String currentTime, String deployedBy, int buildNum) {
+	echo "使用并行模式发布..."
+
+	def parallelStages = [:]
+	deploymentPlan.each { module, version ->
+		parallelStages[module] = {
+			deployBackendModule(module, version)
+		}
+	}
+	parallel parallelStages
+
+	return recordDeployResults(deploymentPlan, currentTime, deployedBy, buildNum, 'success')
+}
+def deployBackendSerial(Map deploymentPlan, String currentTime, String deployedBy, int buildNum) {
+	echo "使用串行模式发布..."
+
+	def deployResults
+
+	if (env.DEPLOY_MODE == 'MULTI_HOST') {
+		deployResults = deployBackendSerialMultiHost(deploymentPlan, currentTime, deployedBy, buildNum)
+	} else {
+		deployResults = deployBackendSerialSingleHost(deploymentPlan, currentTime, deployedBy, buildNum)
+	}
+
+	return deployResults
+}
+def deployBackendSerialMultiHost(Map deploymentPlan, String currentTime, String deployedBy, int buildNum) {
+	def hostsConfig = readJSON text: env.HOSTS_CONFIG
+	def deployResults = [:]
+
+	hostsConfig.each { hostConfig ->
+		def host = hostConfig.host
+		deployResults[host] = [
+			name: hostConfig.name,
+			modules: [:],
+			lastDeployTime: currentTime
+		]
+	}
+	deploymentPlan.each { module, version ->
+		echo "\n=========================================="
+		echo "发布模块: ${module}"
+		echo "版本: ${version}"
+		echo "=========================================="
+
+		try {
+			deployBackendModule(module, version)
+
+			hostsConfig.each { hostConfig ->
+				def host = hostConfig.host
+				deployResults[host].modules[module] = createModuleInfo(
+					version, currentTime, deployedBy, buildNum, 'success'
+				)
+			}
+		} catch (Exception e) {
+			echo "❌ 模块 ${module} 部署失败: ${e.message}"
+
+			hostsConfig.each { hostConfig ->
+				def host = hostConfig.host
+				deployResults[host].modules[module] = createModuleInfo(
+					version, currentTime, deployedBy, buildNum, 'failed', e.message
+				)
+			}
+
+			throw e
+		}
+	}
+
+	return deployResults
+}
+
+def deployBackendSerialSingleHost(Map deploymentPlan, String currentTime, String deployedBy, int buildNum) {
+	def host = env.HOST
+	def moduleResults = [:]
+
+	deploymentPlan.each { module, version ->
+		echo "\n=========================================="
+		echo "发布模块: ${module}"
+		echo "版本: ${version}"
+		echo "=========================================="
+
+		try {
+			deployBackendModule(module, version)
+
+			moduleResults[module] = createModuleInfo(
+				version, currentTime, deployedBy, buildNum, 'success'
+			)
+		} catch (Exception e) {
+			echo "❌ 模块 ${module} 部署失败: ${e.message}"
+
+			moduleResults[module] = createModuleInfo(
+				version, currentTime, deployedBy, buildNum, 'failed', e.message
+			)
+
+			throw e
+		}
+	}
+
+	return [
+		(host): [
+			name: "单主机",
+			modules: moduleResults,
+			lastDeployTime: currentTime
+		]
+	]
+}
+
+def recordDeployResults(Map deploymentPlan, String currentTime, String deployedBy, int buildNum, String status) {
+	def deployResults = [:]
+
+	if (env.DEPLOY_MODE == 'MULTI_HOST') {
+		def hostsConfig = readJSON text: env.HOSTS_CONFIG
+
+		hostsConfig.each { hostConfig ->
+			def host = hostConfig.host
+			def moduleResults = [:]
+
+			deploymentPlan.each { module, version ->
+				moduleResults[module] = createModuleInfo(
+					version, currentTime, deployedBy, buildNum, status
+				)
+			}
+
+			deployResults[host] = [
+				name: hostConfig.name,
+				modules: moduleResults,
+				lastDeployTime: currentTime
+			]
+		}
+	} else {
+		def host = env.HOST
+		def moduleResults = [:]
+
+		deploymentPlan.each { module, version ->
+			moduleResults[module] = createModuleInfo(
+				version, currentTime, deployedBy, buildNum, status
+			)
+		}
+
+		deployResults[host] = [
+			name: "单主机",
+			modules: moduleResults,
+			lastDeployTime: currentTime
+		]
+	}
+
+	return deployResults
+}
+
+def updateDeploymentManifest() {
+	echo "=========================================="
+	echo "📝 更新发布清单（增量更新 + 历史保留 + 实例追踪）"
+	echo "=========================================="
+
+	def manifestDir = '/data/deployments'
+	def manifestFile = "${manifestDir}/production-deployment.json"
+	def currentTime = new Date().format('yyyyMMdd-HHmmss')
+	def newManifestFile = "${manifestDir}/production-deployment-${currentTime}.json"
+
+	def manifest = readExistingManifest(manifestFile)
+
+	manifest = updateManifestWithDeployResults(manifest)
+
+	writeJSON file: newManifestFile, json: manifest, pretty: 4
+	echo ""
+	echo "✅ 新清单已生成: ${newManifestFile}"
+
+	updateManifestSymlink(manifestDir, currentTime)
+
+	cleanOldManifests(manifestDir)
+
+	displayDeploymentStatus(manifest)
+
+	echo ""
+	echo "=========================================="
+	echo "📂 清单文件位置"
+	echo "=========================================="
+	echo "  当前清单: ${manifestFile} (软链接)"
+	echo "  最新清单: ${newManifestFile}"
+	echo "  历史目录: ${manifestDir}"
+	echo "=========================================="
+}
+
+@NonCPS
+def readExistingManifest(String manifestFile) {
+	def manifest = [:]
+
+	if (fileExists(manifestFile)) {
+		try {
+			manifest = readJSON file: manifestFile
+			echo "✓ 读取现有清单成功"
+			echo "  当前清单: ${manifestFile}"
+		} catch (Exception e) {
+			echo "⚠️ 读取现有清单失败，创建新清单: ${e.message}"
+			manifest = [:]
+		}
+	} else {
+		echo "✓ 首次创建清单"
+	}
+
+	if (!manifest.projects) {
+		manifest.projects = [:]
+	}
+	if (!manifest.projects[env.PROJECT_NAME]) {
+		manifest.projects[env.PROJECT_NAME] = [:]
+	}
+	if (!manifest.projects[env.PROJECT_NAME].hosts) {
+		manifest.projects[env.PROJECT_NAME].hosts = [:]
+	}
+
+	return manifest
+}
+
+def updateManifestWithDeployResults(Map manifest) {
+	def deployResults = readJSON text: env.DEPLOY_RESULTS
+
+	deployResults.each { host, result ->
+		echo ""
+		echo "更新主机: ${host} (${result.name})"
+
+		if (!manifest.projects[env.PROJECT_NAME].hosts[host]) {
+			echo "  ✓ 新主机，创建记录"
+			manifest.projects[env.PROJECT_NAME].hosts[host] = [
+				name: result.name,
+				modules: [:],
+				lastDeployTime: result.lastDeployTime
+			]
+		} else {
+			echo "  ✓ 主机已存在，增量更新"
+		}
+
+		result.modules.each { module, moduleInfo ->
+			updateModuleInManifest(manifest, host, module, moduleInfo)
+		}
+
+		manifest.projects[env.PROJECT_NAME].hosts[host].lastDeployTime = result.lastDeployTime
+		manifest.projects[env.PROJECT_NAME].hosts[host].name = result.name
+
+		echo "  ✓ 主机 ${host} 更新完成"
+	}
+
+	def updateTime = new Date().format('yyyy-MM-dd HH:mm:ss')
+	manifest.metadata = [
+		lastUpdate: updateTime,
+		version: '1.0',
+		buildNumber: env.BUILD_NUMBER.toInteger(),
+		deployedBy: env.BUILD_USER ?: 'jenkins'
+	]
+
+	return manifest
+}
+
+@NonCPS
+def updateModuleInManifest(Map manifest, String host, String module, Map moduleInfo) {
+	def oldModuleInfo = manifest.projects[env.PROJECT_NAME].hosts[host].modules[module]
+	def oldVersion = oldModuleInfo?.version
+
+	if (moduleInfo.instances) {
+		echo "  • ${module}: 双实例模式"
+
+		if (!oldModuleInfo) {
+			echo "    - 首次部署此模块"
+			manifest.projects[env.PROJECT_NAME].hosts[host].modules[module] = [
+				version: moduleInfo.version,
+				deployTime: moduleInfo.deployTime,
+				deployedBy: moduleInfo.deployedBy,
+				buildNumber: moduleInfo.buildNumber,
+				status: moduleInfo.status,
+				instances: [:]
+			]
+		} else if (!oldModuleInfo.instances) {
+			echo "    - 从单实例升级到双实例"
+			oldModuleInfo.instances = [:]
+		}
+
+		moduleInfo.instances.each { instance, instInfo ->
+			def oldInstVersion = oldModuleInfo?.instances?."${instance}"?.version
+
+			if (oldInstVersion) {
+				if (oldInstVersion != instInfo.version) {
+					echo "    - ${instance}: ${oldInstVersion} → ${instInfo.version}"
+				} else {
+					echo "    - ${instance}: ${instInfo.version} (重新部署)"
+				}
+			} else {
+				echo "    - ${instance}: 新增 ${instInfo.version}"
+			}
+
+			manifest.projects[env.PROJECT_NAME].hosts[host].modules[module].instances[instance] = instInfo
+		}
+
+		manifest.projects[env.PROJECT_NAME].hosts[host].modules[module].version = moduleInfo.version
+		manifest.projects[env.PROJECT_NAME].hosts[host].modules[module].deployTime = moduleInfo.deployTime
+		manifest.projects[env.PROJECT_NAME].hosts[host].modules[module].deployedBy = moduleInfo.deployedBy
+		manifest.projects[env.PROJECT_NAME].hosts[host].modules[module].buildNumber = moduleInfo.buildNumber
+		manifest.projects[env.PROJECT_NAME].hosts[host].modules[module].status = moduleInfo.status
+
+	} else {
+		if (oldVersion) {
+			echo "  • ${module}: ${oldVersion} → ${moduleInfo.version}"
+		} else {
+			echo "  • ${module}: 新增 ${moduleInfo.version}"
+		}
+
+		manifest.projects[env.PROJECT_NAME].hosts[host].modules[module] = moduleInfo
+	}
+}
+
+def updateManifestSymlink(String manifestDir, String currentTime) {
+	sh """
+        cd ${manifestDir}
+
+        if [ -L production-deployment.json ]; then
+            rm -f production-deployment.json
+            echo "✓ 删除旧软链接"
+        elif [ -f production-deployment.json ]; then
+            mv production-deployment.json production-deployment.json.backup
+            echo "✓ 备份旧文件为 production-deployment.json.backup"
+        fi
+
+        ln -s production-deployment-${currentTime}.json production-deployment.json
+        echo "✓ 创建新软链接指向最新清单"
+
+        ls -lh production-deployment.json
+    """
+}
+
+def cleanOldManifests(String manifestDir) {
+	sh """
+        cd ${manifestDir}
+
+        HISTORY_COUNT=\$(ls -1 production-deployment-*.json 2>/dev/null | wc -l)
+        echo ""
+        echo "📊 历史清单统计:"
+        echo "  当前数量: \$HISTORY_COUNT"
+
+        if [ "\$HISTORY_COUNT" -gt 10 ]; then
+            echo "  保留数量: 10"
+            echo "  清理数量: \$((HISTORY_COUNT - 10))"
+
+            ls -1t production-deployment-*.json | tail -n +11 | xargs rm -f
+            echo "  ✅ 已清理旧清单"
+        else
+            echo "  ✅ 无需清理（未超过 10 个）"
+        fi
+
+        echo ""
+        echo "📋 历史清单列表（最近 10 个）:"
+        ls -1t production-deployment-*.json | head -10 | while read file; do
+            SIZE=\$(du -h "\$file" | cut -f1)
+            TIME=\$(stat -c %y "\$file" | cut -d'.' -f1)
+            echo "  • \$file (\$SIZE, \$TIME)"
+        done
+    """
+}
+
+def displayDeploymentStatus(Map manifest) {
+	echo ""
+	echo "=========================================="
+	echo "📊 当前完整部署状态"
+	echo "=========================================="
+
+	def deployResults = readJSON text: env.DEPLOY_RESULTS
+
+	manifest.projects[env.PROJECT_NAME].hosts.each { host, info ->
+		echo ""
+		echo "🖥️  ${info.name} (${host})"
+		echo "   最后部署: ${info.lastDeployTime}"
+		echo "   模块总数: ${info.modules.size()}"
+		echo ""
+
+		info.modules.each { module, moduleInfo ->
+			def statusIcon = moduleInfo.status == 'success' ? '✅' : '❌'
+			def isNew = deployResults[host]?.modules?.containsKey(module)
+			def badge = isNew ? " 🆕 本次更新" : ""
+
+			echo "     ${statusIcon} ${module}${badge}"
+			echo "        版本: ${moduleInfo.version}"
+			echo "        时间: ${moduleInfo.deployTime}"
+			echo "        操作人: ${moduleInfo.deployedBy}"
+			echo "        构建号: #${moduleInfo.buildNumber}"
+
+			if (moduleInfo.instances) {
+				echo "        实例模式: 双实例"
+
+				def config = readJSON file: env.CONFIG_FILE
+				def projectConfig = config.projects[env.PROJECT_NAME]
+				def allInstances = projectConfig?.instances?.list ?: ['instance1', 'instance2']
+
+				allInstances.each { instance ->
+					def instInfo = moduleInfo.instances[instance]
+					if (instInfo) {
+						def instIcon = instInfo.status == 'success' ? '✅' : '❌'
+						def isPrimary = (instance == 'instance1' || instance == 'master')
+						def instBadge = isPrimary ? '🔴' : '🟢'
+						def isNewInst = deployResults[host]?.modules?."${module}"?.instances?.containsKey(instance)
+						def updateBadge = isNewInst ? ' [本次更新]' : ''
+
+						echo "          ${instIcon} ${instBadge} ${instance}: ${instInfo.version} (${instInfo.deployTime})${updateBadge}"
+					} else {
+						echo "          ⚪ ${instance}: 未部署"
+					}
+				}
+			} else {
+				echo "        实例模式: 单实例"
+			}
+
+			if (moduleInfo.error) {
+				echo "        错误: ${moduleInfo.error}"
+			}
+		}
+	}
+
+	echo ""
+	echo "=========================================="
+	echo "📝 本次更新摘要"
+	echo "=========================================="
+
+	deployResults.each { host, result ->
+		echo "  ${result.name} (${host}):"
+		result.modules.each { module, moduleInfo ->
+			if (moduleInfo.instances) {
+				echo "    ✓ ${module}: ${moduleInfo.version}"
+				moduleInfo.instances.each { instance, instInfo ->
+					def isPrimary = (instance == 'instance1' || instance == 'master')
+					def badge = isPrimary ? '🔴' : '🟢'
+					echo "      ${badge} ${instance}: ${instInfo.version}"
+				}
+			} else {
+				echo "    ✓ ${module}: ${moduleInfo.version}"
+			}
+		}
+	}
+}
+
+@NonCPS
+def parseProjectInfo(String project) {
+	def matcher = project =~ /^\[(后端|前端)\]\s+(.+)$/
+	if (!matcher.find()) {
+		return null
+	}
+	return [
+		typeCn: matcher.group(1).toString(),
+		name: matcher.group(2).toString()
+	]
+}
+
+def deployBackendModule(String module, String version) {
+
+	if (env.DEPLOY_MODE == 'MULTI_HOST') {
+
+		def hostsConfig = readJSON text: env.HOSTS_CONFIG
+
+		echo ""
+		echo "=========================================="
+		echo "📦 模块: ${module}"
+		echo "🔄 多主机部署模式（共 ${hostsConfig.size()} 台主机）"
+		echo "=========================================="
+
+		hostsConfig.eachWithIndex { hostConfig, index ->
+			echo ""
+			echo "----------------------------------------"
+			echo "🖥️  主机 ${index + 1}/${hostsConfig.size()}: ${hostConfig.name} (${hostConfig.host})"
+			echo "----------------------------------------"
+
+			deployToSingleHost(
+				module: module,
+				version: version,
+				host: hostConfig.host,
+				user: hostConfig.user,
+				baseDir: hostConfig.baseDir,
+				hostName: hostConfig.name
+			)
+
+			echo "✅ 主机 ${index + 1} 部署完成"
+		}
+
+		echo ""
+		echo "=========================================="
+		echo "✅ 模块 ${module} 已成功部署到所有 ${hostsConfig.size()} 台主机"
+		echo "=========================================="
+
+	} else {
+		deployToSingleHost(
+			module: module,
+			version: version,
+			host: env.HOST,
+			user: env.USER,
+			baseDir: env.BASE_DIR,
+			hostName: env.HOST
+		)
+	}
+}
+
+def deployToSingleHost(Map config) {
+	def module = config.module
+	def version = config.version
+	def host = config.host
+	def user = config.user
+	def baseDir = config.baseDir
+	def hostName = config.hostName
+
+	def instanceMode = env.INSTANCE_MODE ?: 'SINGLE'
+	def selectedInstances = []
+
+	if (instanceMode == 'MULTI') {
+		selectedInstances = env.SELECTED_INSTANCES.split(',').collect { it.trim() }
+	}
+
+	def isDataPlatformJobs = env.PROJECT_NAME == 'zcf-data-platform-jobs'
+
+	if (instanceMode == 'MULTI' && !isDataPlatformJobs) {
+		echo ""
+		echo "=========================================="
+		echo "🎯 双实例模式部署"
+		echo "模块: ${module}"
+		echo "版本: ${version}"
+		echo "主机: ${hostName} (${host})"
+		echo "实例: ${selectedInstances.join(', ')}"
+		echo "=========================================="
+
+		def artifactFile = "${env.ARTIFACTS_DIR}/backend/${env.PROJECT_NAME}/${module}/${version}"
+		def jarName = "${module}.jar"
+
+		selectedInstances.eachWithIndex { instance, idx ->
+			def instancePath = "${baseDir}/${module}/${instance}"
+			def isPrimary = (instance == 'instance1' || instance == 'master')
+			def badge = isPrimary ? '🔴 主实例' : '🟢 从实例'
+
+			echo ""
+			echo "----------------------------------------"
+			echo "${badge} 实例 ${idx + 1}/${selectedInstances.size()}: ${instance}"
+			echo "----------------------------------------"
+			echo "  源文件: ${artifactFile}"
+			echo "  目标路径: ${instancePath}/${jarName}"
+
+			sshagent(['deploy-ssh-key']) {
+				echo "  [${instance}] 1/6 检查目录结构..."
+				sh """
+                    ssh -o StrictHostKeyChecking=no ${user}@${host} '
+                        # 创建实例目录
+                        mkdir -p ${instancePath}
+                        echo "✅ 实例目录: ${instancePath}"
+
+                        # 检查是否首次部署
+                        if [ -f ${instancePath}/${jarName} ]; then
+                            CURRENT_SIZE=\$(du -h ${instancePath}/${jarName} | cut -f1)
+                            CURRENT_TIME=\$(stat -c %y ${instancePath}/${jarName} | cut -d. -f1)
+                            echo "📦 当前版本: \$CURRENT_SIZE (\$CURRENT_TIME)"
+                        else
+                            echo "ℹ️  首次部署到此实例"
+                        fi
+
+                        # 显示历史备份
+                        echo ""
+                        echo "📚 ${instance} 历史备份:"
+                        if ls ${instancePath}/${jarName}.bak.* >/dev/null 2>&1; then
+                            ls -lht ${instancePath}/${jarName}.bak.* | head -5 | while read -r line; do
+                                filename=\$(echo "\$line" | awk "{print \\\$9}")
+                                size=\$(echo "\$line" | awk "{print \\\$5}")
+                                date=\$(echo "\$line" | awk "{print \\\$6, \\\$7, \\\$8}")
+                                echo "  \$(basename \$filename) (\$size, \$date)"
+                            done
+                        else
+                            echo "  (无)"
+                        fi
+                        echo ""
+                    '
+                """
+
+				echo "  [${instance}] 2/6 停止服务..."
+				sh """
+                    ssh -o StrictHostKeyChecking=no ${user}@${host} '
+                        cd ${instancePath}
+
+                        # 查找停止脚本
+                        STOP_SCRIPTS=\$(find . -maxdepth 1 -name "stop*.sh" -type f | sort)
+
+                        if [ -z "\$STOP_SCRIPTS" ]; then
+                            echo "⚠️  未找到停止脚本，使用通用停止逻辑..."
+
+                            APP_NAME="${jarName}"
+                            MAX_RETRIES=3
+                            SLEEP_TIME=10
+
+                            PIDS=\$(ps -ef | grep "${instancePath}/\$APP_NAME" | grep -v grep | awk "{print \\\$2}")
+
+                            if [ -n "\$PIDS" ]; then
+                                echo "发现进程 PIDs: \$PIDS"
+                                echo "\$PIDS" | xargs kill
+
+                                RETRY=0
+                                while [ \$RETRY -lt \$MAX_RETRIES ]; do
+                                    sleep \$SLEEP_TIME
+                                    REMAINING_PIDS=\$(ps -ef | grep "${instancePath}/\$APP_NAME" | grep -v grep | awk "{print \\\$2}")
+
+                                    if [ -z "\$REMAINING_PIDS" ]; then
+                                        echo "✅ 进程已成功终止"
+                                        break
+                                    else
+                                        echo "仍有进程存在，再次尝试 kill (\$((RETRY+1))/\$MAX_RETRIES)..."
+                                        echo "\$REMAINING_PIDS" | xargs kill
+                                        RETRY=\$((RETRY+1))
+                                    fi
+                                done
+
+                                REMAINING_PIDS=\$(ps -ef | grep "${instancePath}/\$APP_NAME" | grep -v grep | awk "{print \\\$2}")
+                                if [ -n "\$REMAINING_PIDS" ]; then
+                                    echo "⚠️  使用 kill -9 强制终止..."
+                                    echo "\$REMAINING_PIDS" | xargs kill -9
+                                    sleep 2
+
+                                    FINAL_PIDS=\$(ps -ef | grep "${instancePath}/\$APP_NAME" | grep -v grep | awk "{print \\\$2}")
+                                    if [ -n "\$FINAL_PIDS" ]; then
+                                        echo "❌ 无法终止所有进程，PIDs: \$FINAL_PIDS"
+                                        exit 1
+                                    fi
+                                fi
+                            else
+                                echo "ℹ️  进程不存在"
+                            fi
+                        else
+                            echo "找到停止脚本: \$STOP_SCRIPTS"
+                            for script in \$STOP_SCRIPTS; do
+                                echo "执行: \$script"
+                                bash \$script || echo "⚠️  \$script 执行失败，继续..."
+                            done
+                        fi
+
+                        echo "✅ 服务已停止"
+                    ' || true
+                """
+				echo "  [${instance}] 3/6 备份旧版本..."
+				sh """
+                    ssh -o StrictHostKeyChecking=no ${user}@${host} '
+                        cd ${instancePath}
+
+                        if [ -f ${jarName} ]; then
+                            BACKUP_FILE="${jarName}.bak.\$(date +%Y%m%d_%H%M%S)"
+                            mv ${jarName} "\$BACKUP_FILE"
+                            echo "✅ 旧版本已备份为: \$BACKUP_FILE"
+
+                            # 只保留最近5个备份
+                            BACKUP_COUNT=\$(ls -t ${jarName}.bak.* 2>/dev/null | wc -l)
+                            if [ "\$BACKUP_COUNT" -gt 5 ]; then
+                                DELETED=\$(ls -t ${jarName}.bak.* | tail -n +6)
+                                ls -t ${jarName}.bak.* | tail -n +6 | xargs rm -f
+                                echo "✅ 已清理旧备份（保留最近5个）"
+                                echo "删除的备份:"
+                                echo "\$DELETED" | while read f; do echo "  - \$(basename \$f)"; done
+                            fi
+                        else
+                            echo "ℹ️  旧版本不存在，跳过备份"
+                        fi
+                    '
+                """
+				echo "  [${instance}] 4/6 传输新文件..."
+				sh """
+                    scp -o StrictHostKeyChecking=no '${artifactFile}' ${user}@${host}:'${instancePath}/${jarName}'
+
+                    # 验证文件传输
+                    ssh -o StrictHostKeyChecking=no ${user}@${host} '
+                        if [ -f ${instancePath}/${jarName} ]; then
+                            FILE_SIZE=\$(du -h ${instancePath}/${jarName} | cut -f1)
+                            echo "✅ 文件传输成功: \$FILE_SIZE"
+
+                            # 计算 MD5
+                            if command -v md5sum >/dev/null 2>&1; then
+                                MD5=\$(md5sum ${instancePath}/${jarName} | cut -d" " -f1)
+                                echo "MD5: \$MD5"
+                            fi
+                        else
+                            echo "❌ 文件传输失败"
+                            exit 1
+                        fi
+                    '
+                """
+				echo "  [${instance}] 5/6 启动服务..."
+				sh """
+                    ssh -o StrictHostKeyChecking=no ${user}@${host} '
+                        cd ${instancePath}
+
+                        # 查找启动脚本
+                        START_SCRIPTS=\$(find . -maxdepth 1 -name "start*.sh" -type f | sort)
+
+                        if [ -z "\$START_SCRIPTS" ]; then
+                            echo "❌ 未找到启动脚本"
+                            echo "💡 提示: 请在 ${instancePath} 目录下创建 start.sh 或使用 systemd"
+                            exit 1
+                        else
+                            echo "找到启动脚本: \$START_SCRIPTS"
+                            for script in \$START_SCRIPTS; do
+                                echo "执行: \$script"
+                                bash \$script
+                            done
+                            echo "✅ 服务启动命令已执行"
+                        fi
+                    '
+                """
+
+				if (!params.SKIP_HEALTH_CHECK) {
+					echo "  [${instance}] 6/6 健康检查..."
+					sh """
+                        ssh -o StrictHostKeyChecking=no ${user}@${host} '
+                            cd ${instancePath}
+
+                            if [ -f health_check.sh ]; then
+                                echo "执行健康检查..."
+                                bash health_check.sh
+                                echo "✅ 健康检查通过"
+                            else
+                                echo "⚠️  health_check.sh 不存在，跳过健康检查"
+                                echo "💡 建议: 创建 health_check.sh 脚本用于验证服务状态"
+
+                                # 简单的进程检查
+                                sleep 5
+                                PIDS=\$(ps -ef | grep "${instancePath}/${jarName}" | grep -v grep | awk "{print \\\$2}")
+                                if [ -n "\$PIDS" ]; then
+                                    echo "✅ 进程运行中 (PIDs: \$PIDS)"
+                                else
+                                    echo "⚠️  未检测到进程，请手动检查"
+                                fi
+                            fi
+                        '
+                    """
+				} else {
+					echo "  [${instance}] 6/6 跳过健康检查"
+				}
+
+				echo "  [${instance}] ✅ 实例部署完成"
+			}
+
+			if (idx < selectedInstances.size() - 1) {
+				def waitTime = 150
+				echo ""
+				echo "⏳ 等待 ${waitTime} 秒后部署下一个实例..."
+				echo "   (确保当前实例稳定后再部署下一个)"
+				sleep waitTime
+			}
+		}
+
+		echo ""
+		echo "=========================================="
+		echo "✅ 模块 ${module} 所有实例部署完成"
+		echo "已部署实例: ${selectedInstances.join(', ')}"
+		echo "=========================================="
+
+		return
+	}
+
+	def modulePath
+	if (isDataPlatformJobs) {
+		modulePath = baseDir
+	} else {
+		modulePath = "${baseDir}/${module}"
+	}
+
+	def artifactFile = "${env.ARTIFACTS_DIR}/backend/${env.PROJECT_NAME}/${module}/${version}"
+	def jarName = "${module}.jar"
+
+	echo "  [${module}@${hostName}] 开始发布..."
+	echo "  [${module}@${hostName}] 源文件: ${artifactFile}"
+	echo "  [${module}@${hostName}] 目标路径: ${modulePath}/${jarName}"
+
+	sshagent(['deploy-ssh-key']) {
+		if (isDataPlatformJobs) {
+			echo "  [${module}@${hostName}] 1/3 检查目标目录..."
+			sh """
+                ssh -o StrictHostKeyChecking=no ${user}@${host} '
+                    mkdir -p ${modulePath}
+                    echo "✅ 目标目录准备完成"
+
+                    echo ""
+                    echo "📦 ${module} 历史备份:"
+                    if ls ${modulePath}/${jarName}.bak.* >/dev/null 2>&1; then
+                        ls -lht ${modulePath}/${jarName}.bak.* | head -5 | while read -r line; do
+                            filename=\$(echo "\$line" | awk "{print \\\$9}")
+                            size=\$(echo "\$line" | awk "{print \\\$5}")
+                            date=\$(echo "\$line" | awk "{print \\\$6, \\\$7, \\\$8}")
+                            echo "  \$(basename \$filename) (\$size, \$date)"
+                        done
+                    else
+                        echo "  (无)"
+                    fi
+                    echo ""
+                '
+            """
+
+			echo "  [${module}@${hostName}] 2/3 备份现有版本..."
+			sh """
+                ssh -o StrictHostKeyChecking=no ${user}@${host} '
+                    cd ${modulePath}
+
+                    if [ -f ${jarName} ]; then
+                        BACKUP_FILE="${jarName}.bak.\$(date +%Y%m%d_%H%M%S)"
+                        mv ${jarName} "\$BACKUP_FILE"
+                        echo "✅ 现有版本已备份为: \$BACKUP_FILE"
+
+                        BACKUP_COUNT=\$(ls -t ${jarName}.bak.* 2>/dev/null | wc -l)
+                        if [ "\$BACKUP_COUNT" -gt 5 ]; then
+                            ls -t ${jarName}.bak.* | tail -n +6 | xargs rm -f
+                            echo "✅ 已清理旧备份（保留最近5个）"
+                        fi
+                    else
+                        echo "ℹ️  首次发布，无需备份"
+                    fi
+                '
+            """
+
+			echo "  [${module}@${hostName}] 3/3 传输文件..."
+			sh """
+                scp -o StrictHostKeyChecking=no '${artifactFile}' ${user}@${host}:'${modulePath}/${jarName}'
+
+                ssh -o StrictHostKeyChecking=no ${user}@${host} '
+                    if [ -f ${modulePath}/${jarName} ]; then
+                        echo "✅ 文件传输成功"
+                        echo ""
+                        echo "文件信息:"
+                        ls -lh ${modulePath}/${jarName}
+                        echo ""
+
+                        if command -v md5sum >/dev/null 2>&1; then
+                            MD5=\$(md5sum ${modulePath}/${jarName} | cut -d" " -f1)
+                            echo "MD5: \$MD5"
+                        fi
+                        echo ""
+
+                        BACKUP_COUNT=\$(ls ${modulePath}/${jarName}.bak.* 2>/dev/null | wc -l)
+                        echo "📊 ${module} 共有 \$BACKUP_COUNT 个历史备份"
+                    else
+                        echo "❌ 文件传输失败"
+                        exit 1
+                    fi
+                '
+            """
+
+			echo "  [${module}@${hostName}] ✅ 发布完成（Flink 任务 jar，无需启动）"
+
+			if (env.DEPLOY_MODE != 'MULTI_HOST') {
+				echo ""
+				echo "  💡 提示："
+				echo "  • 文件位置: ${modulePath}/${jarName}"
+				echo "  • 需要手动提交到 Flink 集群"
+				echo "  • 提交命令: flink run -d -c <主类> ${modulePath}/${jarName}"
+				echo ""
+			}
+
+		} else {
+			echo "  [${module}@${hostName}] 1/5 停止服务..."
+			sh """
+                ssh -o StrictHostKeyChecking=no ${user}@${host} '
+                    cd ${modulePath}
+
+                    STOP_SCRIPTS=\$(find . -maxdepth 1 -name "stop*.sh" -type f | sort)
+
+                    if [ -z "\$STOP_SCRIPTS" ]; then
+                        echo "⚠️  未找到停止脚本，使用通用停止逻辑..."
+
+                        APP_NAME="${jarName}"
+                        MAX_RETRIES=3
+                        SLEEP_TIME=10
+
+                        PIDS=\$(ps -ef | grep "${modulePath}/\$APP_NAME" | grep -v grep | awk "{print \\\$2}")
+
+                        if [ -n "\$PIDS" ]; then
+                            echo "存在 \$APP_NAME 进程， PIDs为: \$PIDS, 尝试 kill..."
+                            echo "\$PIDS" | xargs kill
+
+                            RETRY=0
+                            while [ \$RETRY -lt \$MAX_RETRIES ]; do
+                                sleep \$SLEEP_TIME
+                                REMAINING_PIDS=\$(ps -ef | grep "${modulePath}/\$APP_NAME" | grep -v grep | awk "{print \\\$2}")
+
+                                if [ -z "\$REMAINING_PIDS" ]; then
+                                    echo "✅ 所有 \$APP_NAME 进程被成功终止."
+                                    break
+                                else
+                                    echo "仍有 \$APP_NAME 进程存在, 再次尝试 kill (Attempt \$((RETRY+1))/\$MAX_RETRIES)..."
+                                    echo "\$REMAINING_PIDS" | xargs kill
+                                    RETRY=\$((RETRY+1))
+                                fi
+                            done
+
+                            REMAINING_PIDS=\$(ps -ef | grep "${modulePath}/\$APP_NAME" | grep -v grep | awk "{print \\\$2}")
+                            if [ -n "\$REMAINING_PIDS" ]; then
+                                echo "⚠️  使用 kill -9 强制终止..."
+                                echo "\$REMAINING_PIDS" | xargs kill -9
+                                sleep 2
+
+                                FINAL_PIDS=\$(ps -ef | grep "${modulePath}/\$APP_NAME" | grep -v grep | awk "{print \\\$2}")
+                                if [ -n "\$FINAL_PIDS" ]; then
+                                    echo "❌ Error: 无法终止所有进程，PIDs: \$FINAL_PIDS"
+                                    exit 1
+                                fi
+                            fi
+                        else
+                            echo "ℹ️  \$APP_NAME 进程不存在."
+                        fi
+                    else
+                        echo "找到停止脚本:"
+                        echo "\$STOP_SCRIPTS"
+                        for script in \$STOP_SCRIPTS; do
+                            echo "执行: \$script"
+                            bash \$script || echo "⚠️  \$script 执行失败，继续..."
+                        done
+                    fi
+                ' || true
+            """
+
+			echo "  [${module}@${hostName}] 2/5 备份旧版本..."
+			sh """
+                ssh -o StrictHostKeyChecking=no ${user}@${host} '
+                    cd ${modulePath}
+
+                    if [ -f ${jarName} ]; then
+                        BACKUP_FILE="${jarName}.bak.\$(date +%Y%m%d_%H%M%S)"
+                        mv ${jarName} "\$BACKUP_FILE"
+                        echo "✅ 旧版本已备份为: \$BACKUP_FILE"
+
+                        ls -t ${jarName}.bak.* 2>/dev/null | tail -n +6 | xargs rm -f 2>/dev/null || true
+                    else
+                        echo "ℹ️  旧版本不存在，跳过备份"
+                    fi
+                '
+            """
+
+			echo "  [${module}@${hostName}] 3/5 传输新文件..."
+			sh """
+                scp -o StrictHostKeyChecking=no '${artifactFile}' ${user}@${host}:'${modulePath}/${jarName}'
+
+                ssh -o StrictHostKeyChecking=no ${user}@${host} '
+                    if [ -f ${modulePath}/${jarName} ]; then
+                        echo "✅ 文件传输成功"
+                        ls -lh ${modulePath}/${jarName}
+                    else
+                        echo "❌ 文件传输失败"
+                        exit 1
+                    fi
+                '
+            """
+
+			echo "  [${module}@${hostName}] 4/5 启动服务..."
+			sh """
+                ssh -o StrictHostKeyChecking=no ${user}@${host} '
+                    cd ${modulePath}
+
+                    START_SCRIPTS=\$(find . -maxdepth 1 -name "start*.sh" -type f | sort)
+
+                    if [ -z "\$START_SCRIPTS" ]; then
+                        echo "❌ 未找到启动脚本"
+                        echo "💡 提示: 请在 ${modulePath} 目录下创建 start.sh 或使用 systemd"
+                        exit 1
+                    else
+                        echo "找到启动脚本:"
+                        echo "\$START_SCRIPTS"
+                        for script in \$START_SCRIPTS; do
+                            echo "执行: \$script"
+                            bash \$script
+                        done
+                        echo "✅ 服务启动命令已执行"
+                    fi
+                '
+            """
+
+			if (!params.SKIP_HEALTH_CHECK) {
+				echo "  [${module}@${hostName}] 5/5 健康检查..."
+				sh """
+                    ssh -o StrictHostKeyChecking=no ${user}@${host} '
+                        cd ${modulePath}
+
+                        if [ -f health_check.sh ]; then
+                            echo "执行健康检查..."
+                            bash health_check.sh
+                            echo "✅ 健康检查通过"
+                        else
+                            echo "⚠️  health_check.sh 不存在，跳过健康检查"
+                            echo "💡 建议: 创建 health_check.sh 脚本用于验证服务状态"
+
+                            # 简单的进程检查
+                            sleep 5
+                            PIDS=\$(ps -ef | grep "${modulePath}/${jarName}" | grep -v grep | awk "{print \\\$2}")
+                            if [ -n "\$PIDS" ]; then
+                                echo "✅ 进程运行中 (PIDs: \$PIDS)"
+                            else
+                                echo "⚠️  未检测到进程，请手动检查"
+                            fi
+                        fi
+                    '
+                """
+			} else {
+				echo "  [${module}@${hostName}] 5/5 跳过健康检查"
+			}
+
+			echo "  [${module}@${hostName}] ✅ 发布完成"
+		}
+	}
+}
+
+def deployFrontendProject(String tarFileName) {
+	def artifactPath = "${env.ARTIFACTS_DIR}/frontend/${env.PROJECT_NAME}/${tarFileName}"
+	def nginxWebRoot = "${env.BASE_DIR}"
+
+	echo "  [前端] 开始发布..."
+	echo "  制品: ${tarFileName}"
+	echo "  源路径: ${artifactPath}"
+	echo "  目标路径: ${nginxWebRoot}"
+
+	sshagent(['deploy-ssh-key']) {
+		echo "  [前端] 1/5 备份旧版本..."
+		sh """
+            ssh -o StrictHostKeyChecking=no ${env.USER}@${env.HOST} '
+                cd ${nginxWebRoot}
+
+                # 检查是否有现有文件（排除备份目录）
+                FILE_COUNT=\$(find . -maxdepth 1 ! -name "." ! -name "backup_*" | wc -l)
+
+                if [ "\$FILE_COUNT" -gt 0 ]; then
+                    BACKUP_DIR="backup_\$(date +%Y%m%d_%H%M%S)"
+                    mkdir -p "\$BACKUP_DIR"
+
+                    echo "备份现有文件到: \$BACKUP_DIR"
+
+                    # 移动所有文件（排除备份目录）
+                    for item in *; do
+                        if [[ "\$item" != backup_* ]]; then
+                            mv "\$item" "\$BACKUP_DIR/" 2>/dev/null || true
+                        fi
+                    done
+
+                    echo "✅ 旧版本已备份"
+
+                    # 只保留最近5个备份
+                    BACKUP_COUNT=\$(ls -dt backup_* 2>/dev/null | wc -l)
+                    if [ "\$BACKUP_COUNT" -gt 5 ]; then
+                        ls -dt backup_* | tail -n +6 | xargs rm -rf
+                        echo "✅ 已清理旧备份（保留最近5个）"
+                    fi
+                else
+                    echo "ℹ️ 首次部署，无需备份"
+                fi
+            '
+        """
+
+		echo "  [前端] 2/5 传输压缩包..."
+		sh """
+            # 传输到临时目录
+            scp -o StrictHostKeyChecking=no '${artifactPath}' ${env.USER}@${env.HOST}:/tmp/frontend-deploy.tar.gz
+
+            # 验证传输
+            ssh -o StrictHostKeyChecking=no ${env.USER}@${env.HOST} '
+                if [ -f /tmp/frontend-deploy.tar.gz ]; then
+                    FILE_SIZE=\$(du -h /tmp/frontend-deploy.tar.gz | cut -f1)
+                    echo "✅ 文件传输成功，大小: \$FILE_SIZE"
+                else
+                    echo "❌ 文件传输失败"
+                    exit 1
+                fi
+            '
+        """
+
+		echo "  [前端] 3/5 解压文件..."
+		sh """
+            ssh -o StrictHostKeyChecking=no ${env.USER}@${env.HOST} '
+                cd ${nginxWebRoot}
+
+                # 解压到临时目录
+                TEMP_DIR=\$(mktemp -d)
+                tar -xzf /tmp/frontend-deploy.tar.gz -C "\$TEMP_DIR"
+
+                echo "临时目录: \$TEMP_DIR"
+                echo "临时目录内容:"
+                ls -la "\$TEMP_DIR"
+
+                DIST_DIR=\$(find "\$TEMP_DIR" -type d -name "dist" | head -1)
+
+                if [ -n "\$DIST_DIR" ]; then
+                    echo "✅ 找到 dist 目录: \$DIST_DIR"
+                    SOURCE_DIR="\$DIST_DIR"
+                else
+                    if [ -f "\$TEMP_DIR/index.html" ]; then
+                        echo "✅ 检测到根目录包含 index.html（H5 项目模式）"
+                        SOURCE_DIR="\$TEMP_DIR"
+                    else
+                        echo "❌ 未找到有效的构建产物"
+                        echo "临时目录结构:"
+                        find "\$TEMP_DIR" -maxdepth 3 -type f
+                        rm -rf "\$TEMP_DIR"
+                        exit 1
+                    fi
+                fi
+
+                echo "使用源目录: \$SOURCE_DIR"
+
+                # 移动文件到部署目录
+                mv "\$SOURCE_DIR"/* . 2>/dev/null || true
+                mv "\$SOURCE_DIR"/.[!.]* . 2>/dev/null || true
+
+                # 清理临时文件
+                rm -rf "\$TEMP_DIR"
+                rm -f /tmp/frontend-deploy.tar.gz
+
+                echo "✅ 文件解压完成"
+            '
+        """
+
+		echo "  [前端] 4/5 验证文件..."
+		sh """
+            ssh -o StrictHostKeyChecking=no ${env.USER}@${env.HOST} '
+                cd ${nginxWebRoot}
+
+                if [ -f index.html ]; then
+                    echo "✅ 文件部署成功"
+                    echo ""
+                    echo "部署文件列表:"
+                    ls -lh | head -15
+                    echo ""
+                    echo "index.html 大小: \$(du -h index.html | cut -f1)"
+
+                    # 统计文件数量
+                    FILE_COUNT=\$(find . -type f ! -path "./backup_*/*" | wc -l)
+                    DIR_COUNT=\$(find . -type d ! -path "./backup_*" ! -path "./backup_*/*" | wc -l)
+                    TOTAL_SIZE=\$(du -sh --exclude="backup_*" . | cut -f1)
+
+                    echo "文件数量: \$FILE_COUNT"
+                    echo "目录数量: \$DIR_COUNT"
+                    echo "总大小: \$TOTAL_SIZE"
+                else
+                    echo "❌ 未找到 index.html，部署可能失败"
+                    echo "当前目录内容:"
+                    ls -la
+                    exit 1
+                fi
+            '
+        """
+
+		echo "  [前端] 5/5 重载 Nginx..."
+		sh """
+            ssh -o StrictHostKeyChecking=no ${env.USER}@${env.HOST} '
+                echo "测试 Nginx 配置..."
+                if sudo nginx -t 2>&1; then
+                    echo "✅ Nginx 配置测试通过"
+
+                    echo "重载 Nginx..."
+                    sudo nginx -s reload
+
+                    if [ \$? -eq 0 ]; then
+                        echo "✅ Nginx 重载成功"
+                    else
+                        echo "❌ Nginx 重载失败"
+                        exit 1
+                    fi
+
+                    # 清理 Nginx 缓存（如果配置了缓存）
+                    if [ -d /var/cache/nginx ]; then
+                        sudo find /var/cache/nginx -type f -delete 2>/dev/null || true
+                        echo "✅ Nginx 缓存已清理"
+                    fi
+                else
+                    echo "❌ Nginx 配置测试失败"
+                    sudo nginx -t
+                    exit 1
+                fi
+            '
+        """
+
+		if (!params.SKIP_HEALTH_CHECK) {
+			echo "  [前端] 6/6 健康检查..."
+			sh """
+                # 等待 Nginx 重载完成
+                sleep 3
+
+                echo "检查网站可访问性..."
+
+                # 尝试访问网站
+                HTTP_CODE=\$(curl -s -o /dev/null -w "%{http_code}" http://${env.HOST} 2>/dev/null || echo "000")
+
+                if [ "\$HTTP_CODE" = "200" ]; then
+                    echo "✅ 前端服务正常 (HTTP 200)"
+                elif [ "\$HTTP_CODE" = "000" ]; then
+                    echo "⚠️ 无法连接到服务器，请检查网络或 Nginx 配置"
+                else
+                    echo "⚠️ HTTP 状态码: \$HTTP_CODE"
+                fi
+
+                # 验证关键文件
+                ssh -o StrictHostKeyChecking=no ${env.USER}@${env.HOST} '
+                    cd ${nginxWebRoot}
+
+                    echo ""
+                    echo "验证关键文件:"
+                    [ -f index.html ] && echo "  ✅ index.html" || echo "  ❌ index.html"
+                    [ -d static ] && echo "  ✅ static/" || echo "  ℹ️ static/ (可能不存在)"
+                    [ -d assets ] && echo "  ✅ assets/" || echo "  ℹ️ assets/ (可能不存在)"
+                    [ -d js ] && echo "  ✅ js/" || echo "  ℹ️ js/ (可能不存在)"
+                    [ -d css ] && echo "  ✅ css/" || echo "  ℹ️ css/ (可能不存在)"
+                '
+            """
+		}
+	}
+	echo "  [前端] ✅ 发布完成"
+}

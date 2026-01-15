@@ -1,0 +1,141 @@
+// Jenkinsfile - 前端项目构建
+
+// 动态获取分支列表
+def getBranches() {
+	def branches = []
+	try {
+		// 从 Git 仓库获取所有分支
+		def branchList = sh(
+			script: "git ls-remote --heads https://github.com/your-company/your-repo.git | awk '{print \$2}' | sed 's|refs/heads/||'",
+			returnStdout: true
+		).trim().split('\n')
+
+		branches = branchList.toList()
+
+		branches.sort { a, b ->
+			if (a == 'master' || a == 'main') return -1
+			if (b == 'master' || b == 'main') return 1
+			return a <=> b
+		}
+
+	} catch (Exception e) {
+		println "获取分支失败: ${e.message}"
+	}
+
+	return branches
+}
+
+// 参数配置
+properties([
+	parameters([
+		choice(
+			name: 'BRANCH_NAME',
+			choices: getBranches(),
+			description: '选择要构建的分支'
+		)
+	])
+])
+
+pipeline {
+	agent any
+	options {
+		buildDiscarder(logRotator(numToKeepStr: '1'))
+	}
+	environment {
+		GIT_URL = 'https://codeup.aliyun.com/6552e8ef77eababf21d319a4/business-platform/frontend/zcf-charge-operation-platform-web.git'
+		GIT_CREDENTIALS_ID = '99b27b05-ecce-4a92-a478-f806be8528f3'  // Jenkins 中配置的 Git 凭证 ID
+		NODE_PATH = '/data/nodejs/node-v24.10.0-linux-x64/bin'
+		NGINX_DIR = '/etc/nginx/plat'
+	}
+
+	stages {
+		stage('准备') {
+			steps {
+				script {
+					echo """
+					==========================================
+					开始构建前端项目
+					分支: ${params.BRANCH_NAME}
+					时间: ${new Date().format('yyyy-MM-dd HH:mm:ss')}
+					==========================================
+					"""
+
+					currentBuild.description = "分支: ${params.BRANCH_NAME}"
+				}
+			}
+		}
+
+		stage('检出代码') {
+			steps {
+				script {
+					echo "检出分支: ${params.BRANCH_NAME}"
+
+					checkout([
+						$class: 'GitSCM',
+						branches: [[name: "*/${params.BRANCH_NAME}"]],
+						userRemoteConfigs: [[
+							url: env.GIT_URL,
+							credentialsId: env.GIT_CREDENTIALS_ID
+						]]
+					])
+
+					sh 'git log -1 --pretty=format:"%h - %an, %ar : %s"'
+				}
+			}
+		}
+
+		stage('安装依赖') {
+			steps {
+				script {
+					echo "安装 npm 依赖..."
+					sh "${env.NODE_PATH}/npm install"
+				}
+			}
+		}
+
+		stage('构建项目') {
+			steps {
+				script {
+					echo "开始构建..."
+					sh "${env.NODE_PATH}/npm run build:test"
+				}
+			}
+		}
+
+		stage('部署到 Nginx') {
+			steps {
+				script {
+					echo "部署到 ${env.NGINX_DIR}"
+
+					sh """
+                        # 备份旧文件（可选）
+                        if [ -d ${env.NGINX_DIR} ]; then
+                            echo "备份旧文件..."
+                            tar -czf ${env.NGINX_DIR}_backup_\$(date +%Y%m%d_%H%M%S).tar.gz -C ${env.NGINX_DIR} . || true
+                        fi
+
+                        # 清空目标目录
+                        rm -rf ${env.NGINX_DIR}/*
+
+                        # 复制构建产物（假设构建产物在 dist 目录）
+                        cp -r dist/* ${env.NGINX_DIR}/
+
+                        echo "部署完成！"
+                        ls -lh ${env.NGINX_DIR}
+                    """
+				}
+			}
+		}
+	}
+
+	post {
+		success {
+			echo "✓ 构建成功！"
+			echo "分支: ${params.BRANCH_NAME}"
+			echo "部署目录: ${env.NGINX_DIR}"
+		}
+		failure {
+			echo "✗ 构建失败！"
+		}
+	}
+}
