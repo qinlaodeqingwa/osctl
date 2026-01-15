@@ -1419,12 +1419,15 @@ def deployToSingleHost(Map config) {
 
 		selectedInstances.eachWithIndex { instance, idx ->
 			def instancePath = "${baseDir}/${module}/${instance}"
-			def isPrimary = (instance == 'instance1' || instance == 'master')
+			def nodeNumber = idx + 1
+			def serviceName = "${module}-node${nodeNumber}.service"
+
+			def isPrimary = (idx == 0)  // 第一个实例为主实例
 			def badge = isPrimary ? '🔴 主实例' : '🟢 从实例'
 
 			// 根据实例名称确定 systemd 服务名称
-			def instanceSuffix = (instance == 'instance1' || instance == 'master') ? 'node1' : 'node2'
-			def serviceName = "${module}-${instanceSuffix}.service"
+			//def instanceSuffix = (instance == 'instance1' || instance == 'master') ? 'node1' : 'node2'
+			//def serviceName = "${module}-${instanceSuffix}.service"
 
 			echo ""
 			echo "----------------------------------------"
